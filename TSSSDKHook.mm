@@ -1,12 +1,10 @@
-// ===== TSSSDK Hook - كامل مع Hooks فعلية =====
+// ===== TSSSDK Hook - كامل مع Hooks فعلية (مصحح) =====
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
-#import <mach-o/dyld.h>
-#import <mach-o/loader.h>
 #import <sys/sysctl.h>
 #import <sys/types.h>
 
@@ -19,9 +17,16 @@
 // تعليمات ARM64
 #define ARM64_BR_X16 0xD61F0200  // br x16
 #define ARM64_LDR_X16 0x58000050  // ldr x16, #8
-#define ARM64_B 0x14000000       // b offset
+
+// دالة مساعدة لتنظيف الذاكرة المؤقتة
+static void ClearCache(void* address, size_t size) {
+    // استخدام __clear_cache المتوفر في المترجم
+    __clear_cache((char*)address, (char*)address + size);
+}
 
 static bool WriteMemory(void* address, const void* data, size_t size) {
+    if (!address || !data || size == 0) return false;
+    
     mach_port_t task = mach_task_self();
     kern_return_t kr;
     
@@ -29,21 +34,15 @@ static bool WriteMemory(void* address, const void* data, size_t size) {
     kr = vm_protect(task, (vm_address_t)address, size, FALSE, 
                     VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
-        // محاولة مع mach_vm_protect
-        kr = mach_vm_protect(task, (mach_vm_address_t)address, 
-                            (mach_vm_size_t)size, FALSE, 
-                            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-        if (kr != KERN_SUCCESS) {
-            return false;
-        }
+        NSLog(@"[Hook] vm_protect failed: %d", kr);
+        return false;
     }
     
     // الكتابة
     memcpy(address, data, size);
     
     // تنظيف الذاكرة المؤقتة
-    sys_dcache_flush(address, size);
-    sys_icache_invalidate(address, size);
+    ClearCache(address, size);
     
     // استعادة الحماية الأصلية
     vm_protect(task, (vm_address_t)address, size, FALSE, 
@@ -243,17 +242,26 @@ static void InitializeHooks() {
 }
 
 static void InstallAllHooks() {
+    int successCount = 0;
+    int failCount = 0;
+    
     for (auto& entry : hookEntries) {
         void* symbol = dlsym(RTLD_DEFAULT, entry.symbolName);
         if (symbol && symbol != entry.hookFunction) {
             if (InstallInlineHook(symbol, entry.hookFunction, entry.originalPtr)) {
                 entry.installed = true;
+                successCount++;
                 NSLog(@"[Hook] ✓ %s hooked at %p", entry.symbolName, symbol);
             } else {
+                failCount++;
                 NSLog(@"[Hook] ✗ Failed to hook %s", entry.symbolName);
             }
+        } else {
+            NSLog(@"[Hook] - %s not found", entry.symbolName);
         }
     }
+    
+    NSLog(@"[Hook] Success: %d, Failed: %d", successCount, failCount);
 }
 
 static void InstallScreenshotHooks() {
