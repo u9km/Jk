@@ -58,9 +58,9 @@ LDFLAGS := \
     -Wl,-dead_strip \
     -Wl,-no_pie \
     -Wl,-allowable_client \
-    -Wl,-export_dynamic \
-    -Wl,-undefined,dynamic_lookup
+    -Wl,-export_dynamic
 
+# المكتبات الأساسية فقط
 LIBS := \
     -framework Foundation \
     -framework UIKit \
@@ -71,18 +71,14 @@ LIBS := \
     -framework MobileCoreServices \
     -framework LocalAuthentication \
     -framework DeviceCheck \
-    -framework CryptoKit \
-    -framework CommonCrypto \
     -lobjc \
-    -lc++ \
-    -lc++abi \
     -lsystem \
     -lz \
     -lc
 
 SOURCES := TSSSDKHook.mm
 
-.PHONY: all clean dylib debug release info
+.PHONY: all clean dylib debug release strip info
 
 all: clean dylib
 
@@ -93,19 +89,17 @@ $(DYLIB_DIR)/$(DYLIB): $(SOURCES)
 	@mkdir -p $(DYLIB_DIR)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(SOURCES) $(LIBS) -o $@
 	@echo "===== تم البناء ====="
-	@echo "===== معلومات الملف ====="
 	@echo "الحجم: $$(du -h $@ | cut -f1)"
 	@echo "النوع: $$(file $@)"
 	@echo "المعماريات: $$(lipo -info $@)"
-	@echo "===== اكتمل ====="
 
 strip: $(DYLIB_DIR)/$(DYLIB)
 	@echo "===== تجريد الرموز ====="
-	$(STRIP) -S -x $@
+	$(STRIP) -S -x $(DYLIB_DIR)/$(DYLIB)
 	@echo "===== إنشاء ملفات التصحيح ====="
-	$(DSYMUTIL) $@ -o $@.dSYM
+	$(DSYMUTIL) $(DYLIB_DIR)/$(DYLIB) -o $(DYLIB_DIR)/$(DYLIB).dSYM
 	@echo "===== تم التجريد ====="
-	@echo "الحجم بعد التجريد: $$(du -h $@ | cut -f1)"
+	@echo "الحجم بعد التجريد: $$(du -h $(DYLIB_DIR)/$(DYLIB) | cut -f1)"
 
 debug: CXXFLAGS += -DDEBUG -g -O0
 debug: LDFLAGS += -g
