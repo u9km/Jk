@@ -1,28 +1,25 @@
 # ===== Makefile لبناء DYLIB بدون مكتبات خارجية =====
 
-# المتغيرات
 TARGET := libTSSSDKHook
 DYLIB := $(TARGET).dylib
 BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
 DYLIB_DIR := $(BUILD_DIR)/dylib
 
-# المترجم
 CXX := clang++
 CC := clang
 
-# المعماريات
 ARCH := arm64
-# ARCH := arm64e
-# ARCH := x86_64
-
-# إصدار iOS
 IOS_MIN := 12.0
-
-# SDK
 SDK := $(shell xcrun --sdk iphoneos --show-sdk-path)
 
-# أعلام الترجمة
+# إضافة include لـ mach-o
+INCLUDES := \
+    -I$(SDK)/usr/include \
+    -I$(SDK)/usr/include/mach-o \
+    -I$(SDK)/System/Library/Frameworks/Foundation.framework/Headers \
+    -I$(SDK)/System/Library/Frameworks/UIKit.framework/Headers
+
 CXXFLAGS := \
     -std=c++17 \
     -O2 \
@@ -40,12 +37,13 @@ CXXFLAGS := \
     -fomit-frame-pointer \
     -ffunction-sections \
     -fdata-sections \
+    $(INCLUDES) \
     -isysroot $(SDK) \
     -miphoneos-version-min=$(IOS_MIN) \
     -target $(ARCH)-apple-ios$(IOS_MIN) \
-    -Wno-everything
+    -Wno-everything \
+    -Wno-unguarded-availability
 
-# أعلام الربط
 LDFLAGS := \
     -dynamiclib \
     -install_name @rpath/$(DYLIB) \
@@ -56,9 +54,11 @@ LDFLAGS := \
     -target $(ARCH)-apple-ios$(IOS_MIN) \
     -Wl,-dead_strip \
     -Wl,-strip_all \
-    -Wl,-no_pie
+    -Wl,-no_pie \
+    -Wl,-allowable_client \
+    -Wl,-export_dynamic \
+    -Wl,-undefined,dynamic_lookup
 
-# المكتبات
 LIBS := \
     -framework Foundation \
     -framework UIKit \
@@ -78,10 +78,8 @@ LIBS := \
     -lz \
     -lc
 
-# ملفات المصدر
 SOURCES := TSSSDKHook.mm
 
-# الأهداف
 .PHONY: all clean dylib debug release
 
 all: clean dylib
@@ -97,11 +95,9 @@ $(DYLIB_DIR)/$(DYLIB): $(SOURCES)
 	@echo "===== إنشاء ملفات التصحيح ====="
 	dsymutil $@ -o $@.dSYM
 	@echo "===== تم البناء ====="
-	@echo "===== معلومات الملف ====="
 	@echo "الحجم: $$(du -h $@ | cut -f1)"
 	@echo "النوع: $$(file $@)"
 	@echo "المعماريات: $$(lipo -info $@)"
-	@echo "===== اكتمل ====="
 
 debug: CXXFLAGS += -DDEBUG -g -O0
 debug: LDFLAGS += -g
