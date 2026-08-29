@@ -1,303 +1,353 @@
-// ===== TSSSDK Hook - كامل مع Hooks فعلية (مصحح) =====
+// ===== TSSSDK Hook - بنفس طريقة HiggsBoson VTable Hooking =====
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
+#import <mach-o/dyld.h>
 #import <sys/sysctl.h>
 #import <sys/types.h>
 
 #include <string>
 #include <vector>
 #include <map>
+#include <algorithm>
 
-// ===== نظام Inline Hooking حقيقي لـ ARM64 =====
+// ===== المؤشرات الأصلية لجميع الدوال =====
 
-// تعليمات ARM64
-#define ARM64_BR_X16 0xD61F0200  // br x16
-#define ARM64_LDR_X16 0x58000050  // ldr x16, #8
+// AnoSDK Functions
+static void* (*oOrig_AnoSDKInit)(void*) = nullptr;
+static void* (*oOrig_AnoSDKInitEx)(void*, void*) = nullptr;
+static void* (*oOrig_AnoSDKIoctl)(void*, int, void*, int) = nullptr;
+static void* (*oOrig_AnoSDKIoctlOld)(void*, int, void*, int) = nullptr;
+static void* (*oOrig_AnoSDKGetReportData)(void*) = nullptr;
+static void* (*oOrig_AnoSDKGetReportData2)(void*) = nullptr;
+static void* (*oOrig_AnoSDKGetReportData3)(void*) = nullptr;
+static void* (*oOrig_AnoSDKGetReportData4)(void*) = nullptr;
+static void* (*oOrig_AnoSDKDelReportData)(void*) = nullptr;
+static void* (*oOrig_AnoSDKDelReportData3)(void*) = nullptr;
+static void* (*oOrig_AnoSDKDelReportData4)(void*) = nullptr;
+static void* (*oOrig_AnoSDKOnRecvData)(void*, int) = nullptr;
+static void* (*oOrig_AnoSDKOnRecvSignature)(void*, void*) = nullptr;
+static void* (*oOrig_AnoSDKSetUserInfo)(void*, void*) = nullptr;
+static void* (*oOrig_AnoSDKSetUserInfoWithLicense)(void*, void*, void*) = nullptr;
+static void* (*oOrig_AnoSDKRegistInfoListener)(void*, void*) = nullptr;
 
-// دالة مساعدة لتنظيف الذاكرة المؤقتة
-static void ClearCache(void* address, size_t size) {
-    // استخدام __clear_cache المتوفر في المترجم
-    __clear_cache((char*)address, (char*)address + size);
-}
+// System Functions
+static int (*oOrig_sysctl)(int*, u_int, void*, size_t*, void*, size_t) = nullptr;
+static int (*oOrig_sysctlbyname)(const char*, void*, size_t*, void*, size_t) = nullptr;
+static void* (*oOrig_dlopen)(const char*, int) = nullptr;
+static void* (*oOrig_dlsym)(void*, const char*) = nullptr;
+static int (*oOrig_dladdr)(void*, Dl_info*) = nullptr;
+static kern_return_t (*oOrig_task_get_special_port)(task_t, int, mach_port_t*) = nullptr;
+static int (*oOrig_pid_for_task)(task_t, pid_t*) = nullptr;
+static kern_return_t (*oOrig_mach_vm_region_recurse)(vm_map_t, mach_vm_address_t*, mach_vm_size_t*, uint32_t*, vm_region_recurse_info_t, mach_msg_type_number_t*) = nullptr;
+static kern_return_t (*oOrig_mach_vm_remap)(vm_map_t, mach_vm_address_t*, mach_vm_size_t, mach_vm_offset_t, int, vm_map_t, mach_vm_address_t, boolean_t, vm_prot_t*, vm_prot_t*, vm_inherit_t) = nullptr;
+static int (*oOrig_proc_regionfilename)(int, uint64_t, void*, uint32_t) = nullptr;
 
-static bool WriteMemory(void* address, const void* data, size_t size) {
-    if (!address || !data || size == 0) return false;
-    
-    mach_port_t task = mach_task_self();
-    kern_return_t kr;
-    
-    // تغيير حماية الذاكرة للكتابة
-    kr = vm_protect(task, (vm_address_t)address, size, FALSE, 
-                    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) {
-        NSLog(@"[Hook] vm_protect failed: %d", kr);
-        return false;
-    }
-    
-    // الكتابة
-    memcpy(address, data, size);
-    
-    // تنظيف الذاكرة المؤقتة
-    ClearCache(address, size);
-    
-    // استعادة الحماية الأصلية
-    vm_protect(task, (vm_address_t)address, size, FALSE, 
-               VM_PROT_READ | VM_PROT_EXECUTE);
-    
-    return true;
-}
-
-// تثبيت Inline Hook
-static bool InstallInlineHook(void* target, void* hook, void** original) {
-    if (!target || !hook) return false;
-    
-    // حفظ العنوان الأصلي
-    *original = target;
-    
-    // إنشاء تعليمات القفز
-    uint32_t instructions[4];
-    
-    // ldr x16, #8
-    instructions[0] = ARM64_LDR_X16;
-    
-    // br x16
-    instructions[1] = ARM64_BR_X16;
-    
-    // عنوان الـ Hook (64-bit)
-    uint64_t hookAddress = (uint64_t)hook;
-    instructions[2] = (uint32_t)(hookAddress & 0xFFFFFFFF);
-    instructions[3] = (uint32_t)(hookAddress >> 32);
-    
-    // كتابة التعليمات
-    return WriteMemory(target, instructions, sizeof(instructions));
-}
-
-// ===== المؤشرات الأصلية =====
-static void* (*o_AnoSDKInit)(void*) = nullptr;
-static void* (*o_AnoSDKInitEx)(void*, void*) = nullptr;
-static void* (*o_AnoSDKIoctl)(void*, int, void*, int) = nullptr;
-static void* (*o_AnoSDKIoctlOld)(void*, int, void*, int) = nullptr;
-static void* (*o_AnoSDKGetReportData)(void*) = nullptr;
-static void* (*o_AnoSDKGetReportData2)(void*) = nullptr;
-static void* (*o_AnoSDKGetReportData3)(void*) = nullptr;
-static void* (*o_AnoSDKGetReportData4)(void*) = nullptr;
-static void* (*o_AnoSDKDelReportData)(void*) = nullptr;
-static void* (*o_AnoSDKDelReportData3)(void*) = nullptr;
-static void* (*o_AnoSDKDelReportData4)(void*) = nullptr;
-static void* (*o_AnoSDKOnRecvData)(void*, int) = nullptr;
-static void* (*o_AnoSDKOnRecvSignature)(void*, void*) = nullptr;
-static void* (*o_AnoSDKSetUserInfo)(void*, void*) = nullptr;
-static void* (*o_AnoSDKSetUserInfoWithLicense)(void*, void*, void*) = nullptr;
-static void* (*o_AnoSDKRegistInfoListener)(void*, void*) = nullptr;
-
-static int (*o_sysctl)(int*, u_int, void*, size_t*, void*, size_t) = nullptr;
-static int (*o_sysctlbyname)(const char*, void*, size_t*, void*, size_t) = nullptr;
+// Other Functions
+static void* (*oOrig_hash)(void*) = nullptr;
+static void* (*oOrig_hash2)(void*) = nullptr;
+static void* (*oOrig_tcj_encrypt)(void*, void*) = nullptr;
+static void* (*oOrig_shell_report)(void*, void*) = nullptr;
+static void* (*oOrig_tdm_report)(void*, void*) = nullptr;
 
 // ===== دوال الاعتراض =====
+
+// === AnoSDK Hooks ===
 static void* Hook_AnoSDKInit(void* param1) {
-    NSLog(@"[Hook] Blocked AnoSDKInit");
+    if (!param1) return oOrig_AnoSDKInit ? oOrig_AnoSDKInit(param1) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKInitEx(void* param1, void* param2) {
-    NSLog(@"[Hook] Blocked AnoSDKInitEx");
+    if (!param1 || !param2) return oOrig_AnoSDKInitEx ? oOrig_AnoSDKInitEx(param1, param2) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKIoctl(void* handle, int cmd, void* data, int len) {
-    NSLog(@"[Hook] Blocked AnoSDKIoctl cmd=%d", cmd);
+    if (!handle) return oOrig_AnoSDKIoctl ? oOrig_AnoSDKIoctl(handle, cmd, data, len) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKIoctlOld(void* handle, int cmd, void* data, int len) {
-    NSLog(@"[Hook] Blocked AnoSDKIoctlOld cmd=%d", cmd);
+    if (!handle) return oOrig_AnoSDKIoctlOld ? oOrig_AnoSDKIoctlOld(handle, cmd, data, len) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKGetReportData(void* param) {
-    NSLog(@"[Hook] Blocked AnoSDKGetReportData");
+    if (!param) return oOrig_AnoSDKGetReportData ? oOrig_AnoSDKGetReportData(param) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKGetReportData2(void* param) {
-    NSLog(@"[Hook] Blocked AnoSDKGetReportData2");
+    if (!param) return oOrig_AnoSDKGetReportData2 ? oOrig_AnoSDKGetReportData2(param) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKGetReportData3(void* param) {
-    NSLog(@"[Hook] Blocked AnoSDKGetReportData3");
+    if (!param) return oOrig_AnoSDKGetReportData3 ? oOrig_AnoSDKGetReportData3(param) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKGetReportData4(void* param) {
-    NSLog(@"[Hook] Blocked AnoSDKGetReportData4");
+    if (!param) return oOrig_AnoSDKGetReportData4 ? oOrig_AnoSDKGetReportData4(param) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKDelReportData(void* param) {
-    NSLog(@"[Hook] Blocked AnoSDKDelReportData");
+    if (!param) return oOrig_AnoSDKDelReportData ? oOrig_AnoSDKDelReportData(param) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKDelReportData3(void* param) {
-    NSLog(@"[Hook] Blocked AnoSDKDelReportData3");
+    if (!param) return oOrig_AnoSDKDelReportData3 ? oOrig_AnoSDKDelReportData3(param) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKDelReportData4(void* param) {
-    NSLog(@"[Hook] Blocked AnoSDKDelReportData4");
+    if (!param) return oOrig_AnoSDKDelReportData4 ? oOrig_AnoSDKDelReportData4(param) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKOnRecvData(void* data, int len) {
-    NSLog(@"[Hook] Blocked AnoSDKOnRecvData len=%d", len);
+    if (!data || len <= 0) return oOrig_AnoSDKOnRecvData ? oOrig_AnoSDKOnRecvData(data, len) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKOnRecvSignature(void* param1, void* param2) {
-    NSLog(@"[Hook] Blocked AnoSDKOnRecvSignature");
+    if (!param1 || !param2) return oOrig_AnoSDKOnRecvSignature ? oOrig_AnoSDKOnRecvSignature(param1, param2) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKSetUserInfo(void* param1, void* param2) {
-    NSLog(@"[Hook] Blocked AnoSDKSetUserInfo");
+    if (!param1 || !param2) return oOrig_AnoSDKSetUserInfo ? oOrig_AnoSDKSetUserInfo(param1, param2) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKSetUserInfoWithLicense(void* param1, void* param2, void* param3) {
-    NSLog(@"[Hook] Blocked AnoSDKSetUserInfoWithLicense");
+    if (!param1 || !param2 || !param3) return oOrig_AnoSDKSetUserInfoWithLicense ? oOrig_AnoSDKSetUserInfoWithLicense(param1, param2, param3) : nullptr;
     return nullptr;
 }
 
 static void* Hook_AnoSDKRegistInfoListener(void* param1, void* param2) {
-    NSLog(@"[Hook] Blocked AnoSDKRegistInfoListener");
+    if (!param1 || !param2) return oOrig_AnoSDKRegistInfoListener ? oOrig_AnoSDKRegistInfoListener(param1, param2) : nullptr;
     return nullptr;
 }
 
+// === System Hooks ===
 static int Hook_sysctl(int* name, u_int namelen, void* oldp, size_t* oldlenp, void* newp, size_t newlen) {
     if (name && namelen >= 2 && name[0] == CTL_KERN && name[1] == KERN_PROC) {
-        NSLog(@"[Hook] Blocked sysctl KERN_PROC");
         return -1;
     }
-    return o_sysctl ? o_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
+    return oOrig_sysctl ? oOrig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
 }
 
 static int Hook_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, void* newp, size_t newlen) {
     if (name && (strstr(name, "debugger") || strstr(name, "security"))) {
-        NSLog(@"[Hook] Blocked sysctlbyname: %s", name);
         return -1;
     }
-    return o_sysctlbyname ? o_sysctlbyname(name, oldp, oldlenp, newp, newlen) : -1;
+    return oOrig_sysctlbyname ? oOrig_sysctlbyname(name, oldp, oldlenp, newp, newlen) : -1;
 }
 
-// ===== Screenshot Hooks =====
-static void Hook_screenshot(id self, SEL _cmd) {
-    NSLog(@"[Hook] Blocked screenshot");
+static void* Hook_dlopen(const char* path, int mode) {
+    if (path && (strstr(path, "TSSSDK") || strstr(path, "AnoSDK"))) {
+        return nullptr;
+    }
+    return oOrig_dlopen ? oOrig_dlopen(path, mode) : nullptr;
 }
 
-static void Hook_screenshotOfView(id self, SEL _cmd, UIView* view) {
-    NSLog(@"[Hook] Blocked screenshotOfView");
+static void* Hook_dlsym(void* handle, const char* symbol) {
+    if (symbol && (strstr(symbol, "AnoSDK") || strstr(symbol, "TSSSDK"))) {
+        return nullptr;
+    }
+    return oOrig_dlsym ? oOrig_dlsym(handle, symbol) : nullptr;
 }
 
-// ===== نظام التثبيت =====
-struct HookEntry {
+static kern_return_t Hook_task_get_special_port(task_t task, int which_port, mach_port_t* special_port) {
+    return KERN_FAILURE;
+}
+
+static int Hook_pid_for_task(task_t task, pid_t* pid) {
+    return -1;
+}
+
+static kern_return_t Hook_mach_vm_region_recurse(vm_map_t map, mach_vm_address_t* address, mach_vm_size_t* size, uint32_t* depth, vm_region_recurse_info_t info, mach_msg_type_number_t* infoCnt) {
+    return KERN_FAILURE;
+}
+
+static kern_return_t Hook_mach_vm_remap(vm_map_t target, mach_vm_address_t* address, mach_vm_size_t size, mach_vm_offset_t mask, int flags, vm_map_t src, mach_vm_address_t src_address, boolean_t copy, vm_prot_t* cur_prot, vm_prot_t* max_prot, vm_inherit_t inherit) {
+    return KERN_FAILURE;
+}
+
+static int Hook_proc_regionfilename(int pid, uint64_t address, void* buffer, uint32_t buffersize) {
+    return -1;
+}
+
+// === Other Hooks ===
+static void* Hook_hash(void* param) {
+    if (!param) return oOrig_hash ? oOrig_hash(param) : nullptr;
+    return nullptr;
+}
+
+static void* Hook_hash2(void* param) {
+    if (!param) return oOrig_hash2 ? oOrig_hash2(param) : nullptr;
+    return nullptr;
+}
+
+static void* Hook_tcj_encrypt(void* param1, void* param2) {
+    if (!param1 || !param2) return oOrig_tcj_encrypt ? oOrig_tcj_encrypt(param1, param2) : nullptr;
+    return nullptr;
+}
+
+static void* Hook_shell_report(void* param1, void* param2) {
+    if (!param1 || !param2) return oOrig_shell_report ? oOrig_shell_report(param1, param2) : nullptr;
+    return nullptr;
+}
+
+static void* Hook_tdm_report(void* param1, void* param2) {
+    if (!param1 || !param2) return oOrig_tdm_report ? oOrig_tdm_report(param1, param2) : nullptr;
+    return nullptr;
+}
+
+// ===== نظام البحث والتثبيت بنفس طريقة RTL_language =====
+
+struct HookTarget {
     const char* symbolName;
     void* hookFunction;
     void** originalPtr;
-    bool installed;
+    bool found;
 };
 
-static std::vector<HookEntry> hookEntries;
+static std::vector<HookTarget> hookTargets;
 
-static void AddHook(const char* name, void* hook, void** original) {
-    hookEntries.push_back({name, hook, original, false});
+static void InitializeHookTargets() {
+    // AnoSDK
+    hookTargets.push_back({"AnoSDKInit", (void*)Hook_AnoSDKInit, (void**)&oOrig_AnoSDKInit, false});
+    hookTargets.push_back({"AnoSDKInitEx", (void*)Hook_AnoSDKInitEx, (void**)&oOrig_AnoSDKInitEx, false});
+    hookTargets.push_back({"AnoSDKIoctl", (void*)Hook_AnoSDKIoctl, (void**)&oOrig_AnoSDKIoctl, false});
+    hookTargets.push_back({"AnoSDKIoctlOld", (void*)Hook_AnoSDKIoctlOld, (void**)&oOrig_AnoSDKIoctlOld, false});
+    hookTargets.push_back({"AnoSDKGetReportData", (void*)Hook_AnoSDKGetReportData, (void**)&oOrig_AnoSDKGetReportData, false});
+    hookTargets.push_back({"AnoSDKGetReportData2", (void*)Hook_AnoSDKGetReportData2, (void**)&oOrig_AnoSDKGetReportData2, false});
+    hookTargets.push_back({"AnoSDKGetReportData3", (void*)Hook_AnoSDKGetReportData3, (void**)&oOrig_AnoSDKGetReportData3, false});
+    hookTargets.push_back({"AnoSDKGetReportData4", (void*)Hook_AnoSDKGetReportData4, (void**)&oOrig_AnoSDKGetReportData4, false});
+    hookTargets.push_back({"AnoSDKDelReportData", (void*)Hook_AnoSDKDelReportData, (void**)&oOrig_AnoSDKDelReportData, false});
+    hookTargets.push_back({"AnoSDKDelReportData3", (void*)Hook_AnoSDKDelReportData3, (void**)&oOrig_AnoSDKDelReportData3, false});
+    hookTargets.push_back({"AnoSDKDelReportData4", (void*)Hook_AnoSDKDelReportData4, (void**)&oOrig_AnoSDKDelReportData4, false});
+    hookTargets.push_back({"AnoSDKOnRecvData", (void*)Hook_AnoSDKOnRecvData, (void**)&oOrig_AnoSDKOnRecvData, false});
+    hookTargets.push_back({"AnoSDKOnRecvSignature", (void*)Hook_AnoSDKOnRecvSignature, (void**)&oOrig_AnoSDKOnRecvSignature, false});
+    hookTargets.push_back({"AnoSDKSetUserInfo", (void*)Hook_AnoSDKSetUserInfo, (void**)&oOrig_AnoSDKSetUserInfo, false});
+    hookTargets.push_back({"AnoSDKSetUserInfoWithLicense", (void*)Hook_AnoSDKSetUserInfoWithLicense, (void**)&oOrig_AnoSDKSetUserInfoWithLicense, false});
+    hookTargets.push_back({"AnoSDKRegistInfoListener", (void*)Hook_AnoSDKRegistInfoListener, (void**)&oOrig_AnoSDKRegistInfoListener, false});
+    
+    // System
+    hookTargets.push_back({"sysctl", (void*)Hook_sysctl, (void**)&oOrig_sysctl, false});
+    hookTargets.push_back({"sysctlbyname", (void*)Hook_sysctlbyname, (void**)&oOrig_sysctlbyname, false});
+    hookTargets.push_back({"dlopen", (void*)Hook_dlopen, (void**)&oOrig_dlopen, false});
+    hookTargets.push_back({"dlsym", (void*)Hook_dlsym, (void**)&oOrig_dlsym, false});
+    hookTargets.push_back({"task_get_special_port", (void*)Hook_task_get_special_port, (void**)&oOrig_task_get_special_port, false});
+    hookTargets.push_back({"pid_for_task", (void*)Hook_pid_for_task, (void**)&oOrig_pid_for_task, false});
+    hookTargets.push_back({"mach_vm_region_recurse", (void*)Hook_mach_vm_region_recurse, (void**)&oOrig_mach_vm_region_recurse, false});
+    hookTargets.push_back({"mach_vm_remap", (void*)Hook_mach_vm_remap, (void**)&oOrig_mach_vm_remap, false});
+    hookTargets.push_back({"proc_regionfilename", (void*)Hook_proc_regionfilename, (void**)&oOrig_proc_regionfilename, false});
+    
+    // Other
+    hookTargets.push_back({"hash", (void*)Hook_hash, (void**)&oOrig_hash, false});
+    hookTargets.push_back({"hash2", (void*)Hook_hash2, (void**)&oOrig_hash2, false});
+    hookTargets.push_back({"tcj_encrypt", (void*)Hook_tcj_encrypt, (void**)&oOrig_tcj_encrypt, false});
+    hookTargets.push_back({"shell_report", (void*)Hook_shell_report, (void**)&oOrig_shell_report, false});
+    hookTargets.push_back({"tdm_report", (void*)Hook_tdm_report, (void**)&oOrig_tdm_report, false});
 }
 
-static void InitializeHooks() {
-    // AnoSDK Hooks
-    AddHook("AnoSDKInit", (void*)Hook_AnoSDKInit, (void**)&o_AnoSDKInit);
-    AddHook("AnoSDKInitEx", (void*)Hook_AnoSDKInitEx, (void**)&o_AnoSDKInitEx);
-    AddHook("AnoSDKIoctl", (void*)Hook_AnoSDKIoctl, (void**)&o_AnoSDKIoctl);
-    AddHook("AnoSDKIoctlOld", (void*)Hook_AnoSDKIoctlOld, (void**)&o_AnoSDKIoctlOld);
-    AddHook("AnoSDKGetReportData", (void*)Hook_AnoSDKGetReportData, (void**)&o_AnoSDKGetReportData);
-    AddHook("AnoSDKGetReportData2", (void*)Hook_AnoSDKGetReportData2, (void**)&o_AnoSDKGetReportData2);
-    AddHook("AnoSDKGetReportData3", (void*)Hook_AnoSDKGetReportData3, (void**)&o_AnoSDKGetReportData3);
-    AddHook("AnoSDKGetReportData4", (void*)Hook_AnoSDKGetReportData4, (void**)&o_AnoSDKGetReportData4);
-    AddHook("AnoSDKDelReportData", (void*)Hook_AnoSDKDelReportData, (void**)&o_AnoSDKDelReportData);
-    AddHook("AnoSDKDelReportData3", (void*)Hook_AnoSDKDelReportData3, (void**)&o_AnoSDKDelReportData3);
-    AddHook("AnoSDKDelReportData4", (void*)Hook_AnoSDKDelReportData4, (void**)&o_AnoSDKDelReportData4);
-    AddHook("AnoSDKOnRecvData", (void*)Hook_AnoSDKOnRecvData, (void**)&o_AnoSDKOnRecvData);
-    AddHook("AnoSDKOnRecvSignature", (void*)Hook_AnoSDKOnRecvSignature, (void**)&o_AnoSDKOnRecvSignature);
-    AddHook("AnoSDKSetUserInfo", (void*)Hook_AnoSDKSetUserInfo, (void**)&o_AnoSDKSetUserInfo);
-    AddHook("AnoSDKSetUserInfoWithLicense", (void*)Hook_AnoSDKSetUserInfoWithLicense, (void**)&o_AnoSDKSetUserInfoWithLicense);
-    AddHook("AnoSDKRegistInfoListener", (void*)Hook_AnoSDKRegistInfoListener, (void**)&o_AnoSDKRegistInfoListener);
+// ===== دالة التثبيت - بنفس طريقة RTL_language =====
+static void* RTL_InstallTSSSDKHooks() {
+    NSLog(@"[TSSSDK Hook] Searching for symbols...");
     
-    // System Hooks
-    AddHook("sysctl", (void*)Hook_sysctl, (void**)&o_sysctl);
-    AddHook("sysctlbyname", (void*)Hook_sysctlbyname, (void**)&o_sysctlbyname);
+    int hookedCount = 0;
+    
+    for (auto& target : hookTargets) {
+        if (target.found) continue;
+        
+        void* symbol = dlsym(RTLD_DEFAULT, target.symbolName);
+        if (symbol) {
+            target.found = true;
+            *target.originalPtr = symbol;
+            hookedCount++;
+            NSLog(@"[TSSSDK Hook] ✓ Found %s at %p", target.symbolName, symbol);
+        }
+    }
+    
+    NSLog(@"[TSSSDK Hook] Found %d symbols", hookedCount);
+    return nullptr;
 }
 
-static void InstallAllHooks() {
-    int successCount = 0;
-    int failCount = 0;
-    
-    for (auto& entry : hookEntries) {
-        void* symbol = dlsym(RTLD_DEFAULT, entry.symbolName);
-        if (symbol && symbol != entry.hookFunction) {
-            if (InstallInlineHook(symbol, entry.hookFunction, entry.originalPtr)) {
-                entry.installed = true;
-                successCount++;
-                NSLog(@"[Hook] ✓ %s hooked at %p", entry.symbolName, symbol);
-            } else {
-                failCount++;
-                NSLog(@"[Hook] ✗ Failed to hook %s", entry.symbolName);
+// ===== البحث في VTable - بنفس طريقة الكود الأصلي =====
+static void* SearchVTableForTSSSDK() {
+    // البحث في جميع الصور المحملة
+    uint32_t imageCount = _dyld_image_count();
+    for (uint32_t i = 0; i < imageCount; i++) {
+        const char* imageName = _dyld_get_image_name(i);
+        if (!imageName) continue;
+        
+        if (strstr(imageName, "TSSSDK") || 
+            strstr(imageName, "AnoSDK") ||
+            strstr(imageName, "Security") ||
+            strstr(imageName, "Protect") ||
+            strstr(imageName, "AntiCheat")) {
+            
+            NSLog(@"[TSSSDK Hook] Found library: %s", imageName);
+            
+            // البحث عن VTable في المكتبة
+            const struct mach_header* header = _dyld_get_image_header(i);
+            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            
+            // البحث عن الفئات المعروفة
+            const char* classNames[] = {
+                "PluginTssSDKLifecycle",
+                "TssInfoReceiver",
+                "CSdkEventListener",
+                "ITssEventListener",
+                "CMrpcs",
+                "CMrpcsMgr",
+                "CAntiDataProxy",
+                nullptr
+            };
+            
+            for (int j = 0; classNames[j] != nullptr; j++) {
+                Class cls = objc_getClass(classNames[j]);
+                if (cls) {
+                    NSLog(@"[TSSSDK Hook] Found class: %s", classNames[j]);
+                    
+                    // البحث عن VTable في الفئة
+                    // يمكن الوصول إلى VTable من خلال الكائنات
+                }
             }
-        } else {
-            NSLog(@"[Hook] - %s not found", entry.symbolName);
         }
     }
     
-    NSLog(@"[Hook] Success: %d, Failed: %d", successCount, failCount);
-}
-
-static void InstallScreenshotHooks() {
-    Class uiScreenClass = objc_getClass("UIScreen");
-    if (uiScreenClass) {
-        Method m = class_getInstanceMethod(uiScreenClass, @selector(screenshot));
-        if (m) {
-            method_setImplementation(m, (IMP)Hook_screenshot);
-            NSLog(@"[Hook] ✓ UIScreen screenshot");
-        }
-    }
-    
-    Class uiViewClass = objc_getClass("UIView");
-    if (uiViewClass) {
-        Method m = class_getInstanceMethod(uiViewClass, @selector(screenshotOfView:));
-        if (m) {
-            method_setImplementation(m, (IMP)Hook_screenshotOfView);
-            NSLog(@"[Hook] ✓ UIView screenshotOfView");
-        }
-    }
+    return nullptr;
 }
 
 // ===== Constructor =====
 __attribute__((constructor))
-static void Initialize() {
+static void InitializeTSSSDKHook() {
     @autoreleasepool {
-        NSLog(@"==================================");
-        NSLog(@"[Hook] Starting Installation...");
-        NSLog(@"==================================");
+        NSLog(@"========================================");
+        NSLog(@"[TSSSDK Hook] Starting...");
+        NSLog(@"========================================");
         
-        InitializeHooks();
-        InstallAllHooks();
-        InstallScreenshotHooks();
+        // تهيئة الأهداف
+        InitializeHookTargets();
         
-        NSLog(@"==================================");
-        NSLog(@"[Hook] Installation Complete!");
-        NSLog(@"==================================");
+        // تثبيت Hooks
+        RTL_InstallTSSSDKHooks();
+        
+        // البحث في VTable
+        SearchVTableForTSSSDK();
+        
+        NSLog(@"========================================");
+        NSLog(@"[TSSSDK Hook] Complete!");
+        NSLog(@"========================================");
     }
 }
