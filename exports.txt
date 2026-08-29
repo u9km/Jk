@@ -1,0 +1,4 @@
+_RTL_Init
+_RTL_language
+_TSSSDKHookInitialize
+_TSSSDKHookCleanup
