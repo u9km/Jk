@@ -8,6 +8,9 @@ DYLIB_DIR := $(BUILD_DIR)/dylib
 
 CXX := clang++
 CC := clang
+STRIP := strip
+DSYMUTIL := dsymutil
+LIPO := lipo
 
 ARCH := arm64
 IOS_MIN := 12.0
@@ -53,7 +56,6 @@ LDFLAGS := \
     -miphoneos-version-min=$(IOS_MIN) \
     -target $(ARCH)-apple-ios$(IOS_MIN) \
     -Wl,-dead_strip \
-    -Wl,-strip_all \
     -Wl,-no_pie \
     -Wl,-allowable_client \
     -Wl,-export_dynamic \
@@ -80,7 +82,7 @@ LIBS := \
 
 SOURCES := TSSSDKHook.mm
 
-.PHONY: all clean dylib debug release
+.PHONY: all clean dylib debug release info
 
 all: clean dylib
 
@@ -90,24 +92,40 @@ $(DYLIB_DIR)/$(DYLIB): $(SOURCES)
 	@echo "===== بناء $(DYLIB) ====="
 	@mkdir -p $(DYLIB_DIR)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(SOURCES) $(LIBS) -o $@
-	@echo "===== تجريد الرموز ====="
-	strip -S -x $@
-	@echo "===== إنشاء ملفات التصحيح ====="
-	dsymutil $@ -o $@.dSYM
 	@echo "===== تم البناء ====="
+	@echo "===== معلومات الملف ====="
 	@echo "الحجم: $$(du -h $@ | cut -f1)"
 	@echo "النوع: $$(file $@)"
 	@echo "المعماريات: $$(lipo -info $@)"
+	@echo "===== اكتمل ====="
+
+strip: $(DYLIB_DIR)/$(DYLIB)
+	@echo "===== تجريد الرموز ====="
+	$(STRIP) -S -x $@
+	@echo "===== إنشاء ملفات التصحيح ====="
+	$(DSYMUTIL) $@ -o $@.dSYM
+	@echo "===== تم التجريد ====="
+	@echo "الحجم بعد التجريد: $$(du -h $@ | cut -f1)"
 
 debug: CXXFLAGS += -DDEBUG -g -O0
 debug: LDFLAGS += -g
 debug: clean dylib
+	@echo "===== وضع التصحيح: بدون تجريد ====="
 
 release: CXXFLAGS += -DNDEBUG -DRELEASE -O3
 release: LDFLAGS += -O3
-release: clean dylib
+release: clean dylib strip
+	@echo "===== وضع الإصدار: تم التجريد ====="
 
 clean:
 	@echo "===== تنظيف ====="
 	rm -rf $(BUILD_DIR)
 	@echo "===== تم التنظيف ====="
+
+info:
+	@echo "===== معلومات ====="
+	@echo "الهدف: $(TARGET)"
+	@echo "المعمارية: $(ARCH)"
+	@echo "SDK: $(SDK)"
+	@echo "إصدار iOS: $(IOS_MIN)"
+	@echo "===== نهاية ====="
