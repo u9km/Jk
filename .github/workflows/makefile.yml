@@ -1,75 +1,16 @@
-name: Build TSSSDK Hook DYLIB
+name: Build DYLIB
 
-on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:
-    inputs:
-      build_type:
-        description: 'نوع البناء'
-        required: true
-        default: 'release'
-        type: choice
-        options:
-          - debug
-          - release
-      arch:
-        description: 'المعمارية'
-        required: true
-        default: 'arm64'
-        type: choice
-        options:
-          - arm64
-          - arm64e
-
-env:
-  DYLIB_NAME: libTSSSDKHook
-  BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
-  ARCH: ${{ github.event.inputs.arch || 'arm64' }}
+on: [push, workflow_dispatch]
 
 jobs:
   build:
-    name: بناء (${{ matrix.arch }} - ${{ matrix.build_type }})
     runs-on: macos-latest
-    strategy:
-      matrix:
-        arch: [arm64, arm64e]
-        build_type: [debug, release]
-      fail-fast: false
-    
     steps:
       - uses: actions/checkout@v4
-      
-      - name: إعداد البيئة
-        run: |
-          echo "بناء ${{ matrix.build_type }} للمعمارية ${{ matrix.arch }}"
-          echo "SDK: $(xcrun --sdk iphoneos --show-sdk-path)"
-          echo "Xcode: $(xcodebuild -version | head -n 1)"
-      
-      - name: تنظيف
-        run: make clean
-      
-      - name: بناء
-        run: make ${{ matrix.build_type }} ARCH=${{ matrix.arch }}
-      
-      - name: التحقق
-        run: |
-          DYLIB="build/dylib/libTSSSDKHook.dylib"
-          if [ -f "$DYLIB" ]; then
-            echo "✅ نجح البناء"
-            file $DYLIB
-            lipo -info $DYLIB
-            du -h $DYLIB
-          else
-            echo "❌ فشل البناء"
-            exit 1
-          fi
-      
-      - name: رفع المخرجات
+      - name: Build
+        run: make all
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.DYLIB_NAME }}-${{ matrix.build_type }}-${{ matrix.arch }}
-          path: build/dylib/
-          retention-days: 30
+          name: libTSSSDKHook
+          path: build/dylib/*.dylib
