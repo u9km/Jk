@@ -5,12 +5,22 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
 #import <sys/sysctl.h>
 #import <CommonCrypto/CommonCrypto.h>
 #include <string>
 #include <vector>
 #include <map>
 #include <algorithm>
+
+// ===== تعريفات بديلة لدوال dyld =====
+extern "C" {
+    uint32_t _dyld_image_count(void) __attribute__((weak_import));
+    const char* _dyld_get_image_name(uint32_t image_index) __attribute__((weak_import));
+    const struct mach_header* _dyld_get_image_header(uint32_t image_index) __attribute__((weak_import));
+    intptr_t _dyld_get_image_vmaddr_slide(uint32_t image_index) __attribute__((weak_import));
+}
 
 // ===== المؤشرات الأصلية =====
 static void* (*oOrig_AnoSDKInit)(void*) = nullptr;
@@ -201,8 +211,65 @@ static void HookVTableFunctions(void** vtable) {
     }
 }
 
+// ===== البحث البديل عن المكتبات =====
 static void SearchAndHookVTable() {
-    NSLog(@"[*] Searching for VTable...");
+    NSLog(@"[*] Searching for TSSSDK libraries...");
+    
+    // استخدام dlopen للبحث عن المكتبات
+    const char* libNames[] = {
+        "libTSSSDK.dylib",
+        "libAnoSDK.dylib",
+        "TSSSDK.framework/TSSSDK",
+        "AnoSDK.framework/AnoSDK",
+        nullptr
+    };
+    
+    for (int i = 0; libNames[i] != nullptr; i++) {
+        void* handle = dlopen(libNames[i], RTLD_NOLOAD | RTLD_NOW);
+        if (handle) {
+            NSLog(@"[+] Found library: %s", libNames[i]);
+            
+            // البحث عن الرموز في المكتبة
+            const char* symbolNames[] = {
+                "AnoSDKInit",
+                "AnoSDKInitEx",
+                "AnoSDKIoctl",
+                "AnoSDKIoctlOld",
+                "AnoSDKGetReportData",
+                "AnoSDKGetReportData2",
+                "AnoSDKGetReportData3",
+                "AnoSDKGetReportData4",
+                "AnoSDKDelReportData",
+                "AnoSDKDelReportData3",
+                "AnoSDKDelReportData4",
+                "AnoSDKOnRecvData",
+                "AnoSDKOnRecvSignature",
+                "AnoSDKSetUserInfo",
+                "AnoSDKSetUserInfoWithLicense",
+                "AnoSDKRegistInfoListener",
+                nullptr
+            };
+            
+            for (int j = 0; symbolNames[j] != nullptr; j++) {
+                void* symbol = dlsym(handle, symbolNames[j]);
+                if (symbol) {
+                    NSLog(@"[+] Found symbol: %s at %p", symbolNames[j], symbol);
+                    
+                    // البحث عن التطابق مع الأهداف
+                    for (auto& target : targets) {
+                        if (!target.found && strcmp(target.name, symbolNames[j]) == 0) {
+                            target.found = true;
+                            *target.originalPtr = symbol;
+                            NSLog(@"[+] Hooked %s at %p", target.name, symbol);
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            dlclose(handle);
+        }
+    }
     
     // البحث في جميع الكائنات المحملة
     uint32_t count = _dyld_image_count();
@@ -213,14 +280,13 @@ static void SearchAndHookVTable() {
         if (strstr(imageName, "TSSSDK") || strstr(imageName, "AnoSDK") || 
             strstr(imageName, "Security") || strstr(imageName, "Protect")) {
             
-            NSLog(@"[+] Found library: %s", imageName);
+            NSLog(@"[+] Found image: %s", imageName);
             
-            // البحث في رموز المكتبة
             const struct mach_header* header = _dyld_get_image_header(i);
             intptr_t slide = _dyld_get_image_vmaddr_slide(i);
             
-            // البحث عن VTable في الذاكرة
-            // يمكن البحث في أقسام __DATA و __DATA_CONST
+            // يمكن البحث في أقسام المكتبة هنا
+            // لكن نكتفي بالبحث عن الرموز
         }
     }
 }
@@ -244,8 +310,27 @@ static int Hook_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, void
 }
 
 // ===== Hook باستخدام Method Swizzling =====
+@interface UIScreen (Hook)
+- (UIImage*)hook_screenshot;
+@end
+
+@implementation UIScreen (Hook)
+- (UIImage*)hook_screenshot {
+    return nil;
+}
+@end
+
+@interface UIView (Hook)
+- (UIImage*)hook_screenshotOfView:(UIView*)view;
+@end
+
+@implementation UIView (Hook)
+- (UIImage*)hook_screenshotOfView:(UIView*)view {
+    return nil;
+}
+@end
+
 static void HookObjectiveCMethods() {
-    // Hook على screenshot
     Class uiScreenClass = objc_getClass("UIScreen");
     if (uiScreenClass) {
         Method originalMethod = class_getInstanceMethod(uiScreenClass, @selector(screenshot));
@@ -256,7 +341,6 @@ static void HookObjectiveCMethods() {
         }
     }
     
-    // Hook على UIView screenshot
     Class uiViewClass = objc_getClass("UIView");
     if (uiViewClass) {
         Method originalMethod = class_getInstanceMethod(uiViewClass, @selector(screenshotOfView:));
@@ -268,45 +352,16 @@ static void HookObjectiveCMethods() {
     }
 }
 
-// ===== فئة ملحقة للـ Hooks =====
-@interface UIScreen (Hook)
-- (UIImage*)hook_screenshot;
-@end
-
-@implementation UIScreen (Hook)
-- (UIImage*)hook_screenshot {
-    // منع التقاط الشاشة
-    return nil;
-}
-@end
-
-@interface UIView (Hook)
-- (UIImage*)hook_screenshotOfView:(UIView*)view;
-@end
-
-@implementation UIView (Hook)
-- (UIImage*)hook_screenshotOfView:(UIView*)view {
-    // منع التقاط الشاشة
-    return nil;
-}
-@end
-
 // ===== Constructor =====
 __attribute__((constructor))
 static void TSSSDKHookInitialize() {
     @autoreleasepool {
         NSLog(@"===== TSSSDK Hook Initializing =====");
         
-        // تهيئة الأهداف
         InitializeTargets();
-        
-        // البحث عن VTable وتثبيت Hooks
         SearchAndHookVTable();
-        
-        // تثبيت Hooks على دوال النظام
         HookObjectiveCMethods();
         
-        // Hook sysctl
         oOrig_sysctl = (int (*)(int*, u_int, void*, size_t*, void*, size_t))dlsym(RTLD_DEFAULT, "sysctl");
         oOrig_sysctlbyname = (int (*)(const char*, void*, size_t*, void*, size_t))dlsym(RTLD_DEFAULT, "sysctlbyname");
         
