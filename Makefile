@@ -14,7 +14,6 @@ CXXFLAGS := \
     -fno-exceptions \
     -fno-rtti \
     -fno-objc-arc \
-    -fno-stack-protector \
     -isysroot $(SDK) \
     -miphoneos-version-min=$(IOS_MIN) \
     -target $(ARCH)-apple-ios$(IOS_MIN) \
@@ -40,7 +39,6 @@ $(DYLIB_DIR)/$(DYLIB): TSSSDKHook.mm
 	@mkdir -p $(DYLIB_DIR)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< $(LIBS) -o $@
 	@echo "✅ تم البناء: $@"
-	@echo "📊 الحجم: $$(du -h $@ | cut -f1)"
 
 clean:
 	rm -rf $(BUILD_DIR)
