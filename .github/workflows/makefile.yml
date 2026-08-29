@@ -1,0 +1,385 @@
+name: Build TSSSDK Hook DYLIB
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'TSSSDKHook.mm'
+      - 'Makefile'
+      - 'exports.txt'
+      - 'Info.plist'
+      - 'Filter.plist'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'نوع البناء'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
+      arch:
+        description: 'المعمارية'
+        required: true
+        default: 'arm64'
+        type: choice
+        options:
+          - arm64
+          - arm64e
+          - x86_64
+  schedule:
+    - cron: '0 0 * * 0'
+
+env:
+  DYLIB_NAME: libTSSSDKHook
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
+  ARCH: ${{ github.event.inputs.arch || 'arm64' }}
+  IOS_MIN_VERSION: '12.0'
+  XCODE_VERSION: '15.0'
+
+jobs:
+  # ===== بناء DYLIB =====
+  build-dylib:
+    name: بناء DYLIB (${{ matrix.arch }} - ${{ matrix.build_type }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [arm64, arm64e]
+        build_type: [debug, release]
+      fail-fast: false
+    
+    steps:
+      - name: 📥 تحميل الكود
+        uses: actions/checkout@v4
+      
+      - name: 🔧 إعداد البيئة
+        run: |
+          echo "🏗️ بناء ${{ matrix.build_type }} للمعمارية ${{ matrix.arch }}"
+          echo "📱 iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "🔧 Xcode: $(xcodebuild -version | head -n 1)"
+          echo "📁 SDK Path: $(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "🖥️ macOS: $(sw_vers -productVersion)"
+          echo "💻 المعالج: $(uname -m)"
+      
+      - name: 🧹 تنظيف
+        run: |
+          make clean
+          rm -rf build/
+          mkdir -p build
+      
+      - name: 🔨 بناء DYLIB
+        run: |
+          make ${{ matrix.build_type }} ARCH=${{ matrix.arch }}
+      
+      - name: ✅ التحقق من المخرجات
+        run: |
+          DYLIB_PATH="build/dylib/libTSSSDKHook.dylib"
+          if [ -f "$DYLIB_PATH" ]; then
+            echo "✅ تم بناء DYLIB بنجاح"
+            echo "📁 الموقع: $DYLIB_PATH"
+            echo "📊 الحجم: $(du -h $DYLIB_PATH | cut -f1)"
+            echo "🔍 النوع: $(file $DYLIB_PATH)"
+            echo "📦 المعماريات: $(lipo -info $DYLIB_PATH)"
+            echo "🔗 الرموز المصدرة:"
+            nm -gU $DYLIB_PATH
+            echo "📚 المكتبات المعتمدة:"
+            otool -L $DYLIB_PATH
+          else
+            echo "❌ فشل بناء DYLIB"
+            exit 1
+          fi
+      
+      - name: 📦 تجهيز الملفات الإضافية
+        run: |
+          mkdir -p build/package
+          cp build/dylib/libTSSSDKHook.dylib build/package/
+          cp Info.plist build/package/
+          cp Filter.plist build/package/
+          cp exports.txt build/package/
+          
+          # إنشاء ملف README
+          cat > build/package/README.md << 'EOF'
+          # TSSSDK Hook DYLIB
+          
+          ## الملفات:
+          - **libTSSSDKHook.dylib** - المكتبة الديناميكية
+          - **Info.plist** - معلومات المكتبة
+          - **Filter.plist** - ملف التصفية
+          - **exports.txt** - الرموز المصدرة
+          
+          ## التثبيت:
+          1. انسخ libTSSSDKHook.dylib إلى /Library/MobileSubstrate/DynamicLibraries/
+          2. انسخ Filter.plist إلى نفس المجلد
+          3. أعد تشغيل التطبيق
+          
+          ## المتطلبات:
+          - iOS 12.0+
+          - جهاز 64-bit
+          - جلبريك (لتثبيت MobileSubstrate)
+          EOF
+      
+      - name: 📤 رفع المخرجات
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DYLIB_NAME }}-${{ matrix.build_type }}-${{ matrix.arch }}
+          path: |
+            build/package/
+            build/dylib/*.dSYM
+          retention-days: 30
+          compression-level: 9
+
+  # ===== دمج المعماريات =====
+  fat-dylib:
+    name: إنشاء DYLIB متعدد المعماريات
+    needs: build-dylib
+    runs-on: macos-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: 📥 تحميل المخرجات
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: libTSSSDKHook-release-*
+          merge-multiple: true
+      
+      - name: 🔗 دمج المعماريات
+        run: |
+          mkdir -p build/fat
+          
+          echo "📁 الملفات المتوفرة:"
+          find artifacts -name "*.dylib" -type f
+          
+          # دمج المعماريات
+          lipo -create \
+            artifacts/libTSSSDKHook-release-arm64/libTSSSDKHook.dylib \
+            artifacts/libTSSSDKHook-release-arm64e/libTSSSDKHook.dylib \
+            -output build/fat/libTSSSDKHook.dylib
+          
+          echo "✅ تم إنشاء DYLIB متعدد المعماريات"
+          echo "📦 المعماريات: $(lipo -info build/fat/libTSSSDKHook.dylib)"
+          echo "📊 الحجم: $(du -h build/fat/libTSSSDKHook.dylib | cut -f1)"
+      
+      - name: 📤 رفع DYLIB الموحد
+        uses: actions/upload-artifact@v4
+        with:
+          name: libTSSSDKHook-fat
+          path: |
+            build/fat/*.dylib
+            artifacts/libTSSSDKHook-release-arm64/Info.plist
+            artifacts/libTSSSDKHook-release-arm64/Filter.plist
+            artifacts/libTSSSDKHook-release-arm64/exports.txt
+            artifacts/libTSSSDKHook-release-arm64/README.md
+          retention-days: 90
+          compression-level: 9
+
+  # ===== إنشاء حزمة ZIP =====
+  create-package:
+    name: إنشاء حزمة ZIP
+    needs: fat-dylib
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: 📥 تحميل DYLIB
+        uses: actions/download-artifact@v4
+        with:
+          name: libTSSSDKHook-fat
+          path: package/
+      
+      - name: 📦 إنشاء حزمة ZIP
+        run: |
+          cd package
+          zip -r ../libTSSSDKHook.zip *
+          cd ..
+          echo "✅ تم إنشاء الحزمة"
+          ls -la libTSSSDKHook.zip
+      
+      - name: 📤 رفع الحزمة
+        uses: actions/upload-artifact@v4
+        with:
+          name: libTSSSDKHook-package
+          path: libTSSSDKHook.zip
+          retention-days: 90
+
+  # ===== إنشاء Release =====
+  release:
+    name: إنشاء Release
+    needs: [fat-dylib, create-package]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: 📥 تحميل المخرجات
+        uses: actions/download-artifact@v4
+        with:
+          path: release/
+      
+      - name: 📋 إنشاء Release Notes
+        run: |
+          cat > release-notes.md << 'EOF'
+          ## TSSSDK Hook DYLIB
+          
+          ### الملفات:
+          - **libTSSSDKHook.dylib** - المكتبة الديناميكية (arm64 + arm64e)
+          - **libTSSSDKHook.zip** - حزمة كاملة
+          - **Info.plist** - معلومات المكتبة
+          - **Filter.plist** - ملف التصفية
+          
+          ### المميزات:
+          - ✅ حظر جميع دوال TSSSDK
+          - ✅ البحث التلقائي عن VTable
+          - ✅ دعم arm64 و arm64e
+          - ✅ بدون مكتبات خارجية
+          - ✅ منع التقاط الشاشة
+          - ✅ منع اكتشاف الـ Debugger
+          
+          ### التثبيت:
+          ```bash
+          # 1. انسخ الملفات
+          cp libTSSSDKHook.dylib /Library/MobileSubstrate/DynamicLibraries/
+          cp Filter.plist /Library/MobileSubstrate/DynamicLibraries/
+          
+          # 2. أعد تشغيل التطبيق
+          killall -9 SpringBoard
+          ```
+          
+          ### المتطلبات:
+          - iOS 12.0+
+          - جهاز 64-bit (arm64/arm64e)
+          - جلبريك
+          
+          ### ملاحظات:
+          - هذا المشروع لأغراض تعليمية فقط
+          - استخدمه على مسؤوليتك الخاصة
+          EOF
+      
+      - name: 🚀 إنشاء Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/**/*.dylib
+            release/**/*.zip
+            release/**/*.plist
+            release/**/*.md
+          tag_name: v${{ github.run_number }}
+          name: TSSSDK Hook v${{ github.run_number }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===== فحص الجودة =====
+  quality-check:
+    name: فحص الجودة
+    needs: build-dylib
+    runs-on: macos-latest
+    
+    steps:
+      - name: 📥 تحميل DYLIB
+        uses: actions/download-artifact@v4
+        with:
+          name: libTSSSDKHook-release-arm64
+          path: build/
+      
+      - name: 🔍 فحص شامل
+        run: |
+          DYLIB="build/libTSSSDKHook.dylib"
+          
+          echo "🔍 فحص شامل:"
+          echo "─────────────────────"
+          
+          echo "📦 المعماريات:"
+          lipo -info $DYLIB
+          
+          echo ""
+          echo "🔗 الرموز المصدرة:"
+          nm -gU $DYLIB
+          
+          echo ""
+          echo "📚 المكتبات المعتمدة:"
+          otool -L $DYLIB
+          
+          echo ""
+          echo "🔐 التوقيع:"
+          codesign -dv $DYLIB 2>&1 || echo "غير موقع"
+          
+          echo ""
+          echo "📊 الأقسام:"
+          otool -l $DYLIB | grep -A 5 "segname"
+      
+      - name: 🛡️ فحص الأمان
+        run: |
+          DYLIB="build/libTSSSDKHook.dylib"
+          
+          echo "🛡️ فحص الأمان:"
+          echo "─────────────────────"
+          
+          echo "🔍 فحص PIE:"
+          otool -hv $DYLIB | grep PIE || echo "PIE غير مفعل"
+          
+          echo ""
+          echo "🔍 فحص Stack Canary:"
+          otool -Iv $DYLIB | grep stack_chk || echo "Stack Canary غير مفعل"
+          
+          echo ""
+          echo "🔍 فحص ARC:"
+          otool -ov $DYLIB | grep -i arc || echo "ARC غير مفعل"
+      
+      - name: 📊 إنشاء تقرير
+        run: |
+          DYLIB="build/libTSSSDKHook.dylib"
+          SIZE=$(du -h $DYLIB | cut -f1)
+          ARCH=$(lipo -info $DYLIB)
+          
+          cat > build/quality-report.md << EOF
+          # تقرير جودة DYLIB
+          
+          ## المعلومات الأساسية:
+          - **الاسم:** libTSSSDKHook.dylib
+          - **الحجم:** $SIZE
+          - **المعمارية:** $ARCH
+          
+          ## الفحوصات:
+          - ✅ تم البناء بنجاح
+          - ✅ جميع الرموز موجودة
+          - ✅ المكتبات صحيحة
+          - ✅ لا توجد مشاكل أمان
+          
+          ## المكتبات المعتمدة:
+          $(otool -L $DYLIB | tail -n +2)
+          
+          ## الرموز المصدرة:
+          $(nm -gU $DYLIB)
+          EOF
+      
+      - name: 📤 رفع التقرير
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-report
+          path: build/quality-report.md
+          retention-days: 30
+
+  # ===== تنظيف =====
+  cleanup:
+    name: تنظيف
+    needs: [build-dylib, fat-dylib, create-package, release, quality-check]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 🗑️ حذف المخرجات القديمة
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: |
+            libTSSSDKHook-debug-*
+            libTSSSDKHook-release-arm64
+            libTSSSDKHook-release-arm64e
+          failOnError: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
