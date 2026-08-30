@@ -9,6 +9,9 @@ SDK := $(shell xcrun --sdk iphoneos --show-sdk-path)
 ARCH ?= arm64
 IOS_MIN := 12.0
 
+# === [التعديل هنا] إضافة جميع ملفات المصدر ===
+SRCS := TSSSDKHook.mm fishhook.c
+
 CXXFLAGS := \
     -std=c++17 \
     -O2 \
@@ -36,10 +39,11 @@ LIBS := \
 
 all: clean $(DYLIB_DIR)/$(DYLIB)
 
-$(DYLIB_DIR)/$(DYLIB): TSSSDKHook.mm
+# === [التعديل هنا] تمرير المتغير SRCS وتغيير $< إلى $^ ===
+$(DYLIB_DIR)/$(DYLIB): $(SRCS)
 	@echo "=== بناء $(DYLIB) ==="
 	@mkdir -p $(DYLIB_DIR)
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< $(LIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(LIBS) -o $@
 	@echo "=== تم البناء ==="
 	@ls -la $@
 	@file $@
