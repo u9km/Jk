@@ -13,7 +13,7 @@
 #import <mach-o/dyld.h>
 #import <mach-o/getsect.h>
 
-// إضافة fishhook (قم بتنزيله من GitHub)
+// تأكد من وجود هذا الملف في نفس مسار المشروع
 #import "fishhook.h"
 
 // ============================================================
@@ -59,14 +59,6 @@ static NSArray* blockedLibraries = @[
 static NSArray* blockedSysctlNames = @[
     @"debugger", @"security", @"csops", @"ptrace", @"jailbreak",
     @"hw.cputype", @"hw.cpusubtype", @"kern.boottime", @"kern.proc"
-];
-
-static NSArray* blockedFilePaths = @[
-    @"comm.dat", @"comm.zip", @"comm_custom.zip", @"comm_ver.zip",
-    @"config.xml", @"config2.xml", @"config3.xml",
-    @"cs_dl", @"cs_dl_only.dat", @"force_cs", @"enable_cache",
-    @"gs_driver.zip", @"mrpcs_abort.dat", @"notify",
-    @"tlf", @"req_custom", @"sav_req", @"gs_lo", @"gs_it"
 ];
 
 // ============================================================
@@ -130,20 +122,33 @@ static int hooked_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, vo
 
 // Hook syscall: منع استدعاءات النظام المشبوهة (مثل ptrace)
 static int hooked_syscall(int number, ...) {
-    if (number == 26 || number == 27) { // ptrace on iOS
+    // 26 هو رقم ptrace في أنظمة BSD/iOS
+    if (number == 26 || number == 27) { 
         NSLog(@"[Hook] 🚫 syscall ptrace blocked");
-        return -1;
+        return 0; // إرجاع 0 (نجاح وهمي) لمنع إغلاق التطبيق
     }
+    
+    // استخراج الوسائط (syscall يقبل 6 وسائط كحد أقصى)
     va_list args;
     va_start(args, number);
-    int result = orig_syscall ? orig_syscall(number, args) : -1;
+    void *arg1 = va_arg(args, void *);
+    void *arg2 = va_arg(args, void *);
+    void *arg3 = va_arg(args, void *);
+    void *arg4 = va_arg(args, void *);
+    void *arg5 = va_arg(args, void *);
+    void *arg6 = va_arg(args, void *);
     va_end(args);
-    return result;
+    
+    return orig_syscall ? orig_syscall(number, arg1, arg2, arg3, arg4, arg5, arg6) : -1;
 }
 
 // ============================================================
 // 4. Method Swizzling لدوال Objective-C (مثال: UIScreen)
 // ============================================================
+
+// تمت إضافة الواجهة (Interface) لتجنب أخطاء البناء
+@interface SafeSwizzler : NSObject
+@end
 
 @implementation SafeSwizzler
 
@@ -180,18 +185,19 @@ static int hooked_syscall(int number, ...) {
 + (void)installHooks {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        // استخدام fishhook لتغيير الدوال
+        
+        // التحويل الصحيح (Casting) للأنواع حسب متطلبات fishhook (مهم جداً لتجاوز أخطاء البناء)
         struct rebinding rebindings[] = {
-            {"dlsym", hooked_dlsym, (void*)&orig_dlsym},
-            {"dlopen", hooked_dlopen, (void*)&orig_dlopen},
-            {"sysctl", hooked_sysctl, (void*)&orig_sysctl},
-            {"sysctlbyname", hooked_sysctlbyname, (void*)&orig_sysctlbyname},
-            {"syscall", hooked_syscall, (void*)&orig_syscall}
+            {"dlsym", (void *)hooked_dlsym, (void **)&orig_dlsym},
+            {"dlopen", (void *)hooked_dlopen, (void **)&orig_dlopen},
+            {"sysctl", (void *)hooked_sysctl, (void **)&orig_sysctl},
+            {"sysctlbyname", (void *)hooked_sysctlbyname, (void **)&orig_sysctlbyname},
+            {"syscall", (void *)hooked_syscall, (void **)&orig_syscall}
         };
+        
         rebind_symbols(rebindings, sizeof(rebindings)/sizeof(rebindings[0]));
         NSLog(@"[Hook] ✅ System hooks installed via fishhook");
         
-        // يمكن إضافة المزيد من الإجراءات هنا مثل منع فتح الملفات المحظورة
     });
 }
 
@@ -203,7 +209,7 @@ static int hooked_syscall(int number, ...) {
 
 __attribute__((constructor))
 static void InitializeHooks() {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [HookInstaller installHooks];
     });
 }
