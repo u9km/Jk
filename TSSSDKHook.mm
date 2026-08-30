@@ -346,13 +346,12 @@ private:
         kr = vm_protect(task, (vm_address_t)address, size, FALSE,
                         VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
         
-        if (kr != KERN_SUCCESS) return false;
+        if (kr != KERN_SUCCESS) {
+            return false;
+        }
         
         // الكتابة
         memcpy(address, data, size);
-        
-        // تنظيف الذاكرة المؤقتة
-        __clear_cache((char*)address, (char*)address + size);
         
         // استعادة الحماية
         vm_protect(task, (vm_address_t)address, size, FALSE,
