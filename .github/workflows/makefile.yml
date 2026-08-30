@@ -1,16 +1,91 @@
-name: Build DYLIB
+name: Build TSSSDK Hook DYLIB
 
-on: [push, workflow_dispatch]
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  DYLIB_NAME: libTSSSDKHook
+  BUILD_TYPE: release
+  ARCH: arm64
 
 jobs:
   build:
+    name: بناء DYLIB
     runs-on: macos-latest
+    
     steps:
-      - uses: actions/checkout@v4
-      - name: Build
-        run: make all
-      - name: Upload
+      - name: 📥 تحميل الكود
+        uses: actions/checkout@v4
+      
+      - name: 🔧 إعداد البيئة
+        run: |
+          echo "🏗️ بناء ${{ env.BUILD_TYPE }} للمعمارية ${{ env.ARCH }}"
+          echo "📱 SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "🔧 Xcode: $(xcodebuild -version | head -n 1)"
+          echo "📁 SDK Path: $(xcrun --sdk iphoneos --show-sdk-path)"
+          ls -la
+      
+      - name: 🧹 تنظيف
+        run: |
+          make clean || true
+          rm -rf build/
+      
+      - name: 🔨 بناء DYLIB
+        run: |
+          make release ARCH=${{ env.ARCH }}
+          echo "=== محتويات build ==="
+          find build -type f -ls
+      
+      - name: ✅ التحقق من المخرجات
+        run: |
+          DYLIB_PATH="build/dylib/libTSSSDKHook.dylib"
+          
+          if [ -f "$DYLIB_PATH" ]; then
+            echo "✅ تم بناء DYLIB بنجاح"
+            echo "📊 الحجم: $(du -h $DYLIB_PATH | cut -f1)"
+            echo "🔍 النوع: $(file $DYLIB_PATH)"
+            echo "📦 المعماريات: $(lipo -info $DYLIB_PATH)"
+            
+            # إنشاء مجلد للـ artifact
+            mkdir -p artifact
+            cp $DYLIB_PATH artifact/
+            
+            # إنشاء ملف معلومات
+            cat > artifact/README.md << EOF
+            # TSSSDK Hook DYLIB
+            
+            ## المعلومات:
+            - **الملف:** libTSSSDKHook.dylib
+            - **الحجم:** $(du -h $DYLIB_PATH | cut -f1)
+            - **المعمارية:** $(lipo -info $DYLIB_PATH | head -1)
+            
+            ## الاستخدام:
+            انسخ الملف إلى التطبيق المستهدف
+            EOF
+            
+          else
+            echo "❌ فشل البناء - الملف غير موجود"
+            echo "=== محتويات build ==="
+            find build -type f 2>/dev/null || echo "لا يوجد مجلد build"
+            exit 1
+          fi
+      
+      - name: 📤 رفع DYLIB
         uses: actions/upload-artifact@v4
         with:
-          name: libTSSSDKHook
+          name: ${{ env.DYLIB_NAME }}-${{ env.ARCH }}
+          path: artifact/
+          retention-days: 30
+          compression-level: 0  # بدون ضغط للحفاظ على الملف
+      
+      - name: 📤 رفع DYLIB مباشرة (بدون ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DYLIB_NAME }}-raw
           path: build/dylib/*.dylib
+          retention-days: 30
+          compression-level: 0
