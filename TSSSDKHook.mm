@@ -1,6 +1,5 @@
 // ============================================================
-// HOOK SYSTEM FOR NON-JAILBROKEN iOS (Secure & Crash-Free)
-// Based on strings extracted from anogs.cpp
+// HOOK SYSTEM FOR NON-JAILBROKEN iOS (Secure, Crash-Free, Pure C core)
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -12,204 +11,175 @@
 #import <sys/sysctl.h>
 #import <mach-o/dyld.h>
 #import <mach-o/getsect.h>
+#import <errno.h> // لحل مشكلة إرجاع -1
 
-// تأكد من وجود هذا الملف في نفس مسار المشروع
 #import "fishhook.h"
 
 // ============================================================
-// 1. تعريف التواقيع والمتغيرات الأصلية
+// 1. تعريف التواقيع الأصلية
 // ============================================================
 
 typedef void* (*dlsym_orig_t)(void* handle, const char* symbol);
 typedef void* (*dlopen_orig_t)(const char* path, int mode);
 typedef int (*sysctl_orig_t)(int*, u_int, void*, size_t*, void*, size_t);
 typedef int (*sysctlbyname_orig_t)(const char*, void*, size_t*, void*, size_t);
-typedef int (*syscall_orig_t)(int, ...);
+// استبدال syscall بـ ptrace لحل المشكلة #4 و #8
+typedef int (*ptrace_orig_t)(int request, pid_t pid, caddr_t addr, int data);
 
 static dlsym_orig_t orig_dlsym = NULL;
 static dlopen_orig_t orig_dlopen = NULL;
 static sysctl_orig_t orig_sysctl = NULL;
 static sysctlbyname_orig_t orig_sysctlbyname = NULL;
-static syscall_orig_t orig_syscall = NULL;
+static ptrace_orig_t orig_ptrace = NULL;
 
 // ============================================================
-// 2. قوائم الحظر المستخرجة من anogs.cpp
+// 2. قوائم الحظر (Pure C Arrays لحل المشكلة #7 و #11)
 // ============================================================
 
-static NSArray* blockedSymbols = @[
-    // AnoSDK Functions
-    @"AnoSDKInit", @"AnoSDKInitEx", @"AnoSDKIoctl", @"AnoSDKIoctlOld",
-    @"AnoSDKGetReportData", @"AnoSDKGetReportData2", @"AnoSDKGetReportData3", @"AnoSDKGetReportData4",
-    @"AnoSDKDelReportData", @"AnoSDKDelReportData3", @"AnoSDKDelReportData4",
-    @"AnoSDKOnRecvData", @"AnoSDKOnRecvSignature",
-    @"AnoSDKSetUserInfo", @"AnoSDKSetUserInfoWithLicense", @"AnoSDKRegistInfoListener",
-    // TSS/ACE Functions
-    @"ChkInit", @"ChkLogout", @"ChkSetGameStatus", @"SetUserInfoEx",
-    // MRPCS Functions
-    @"mrpcs", @"mrpcs_lib", @"ms_data_crc", @"ms_data_len", @"ms_data_mod_info",
-    @"ms_open_file", @"set_inline_hook_error", @"download_data_failed",
-    @"ms_scan_start", @"ms_send_start", @"ms_down_start", @"mmap_fialed",
-    @"ms_mmap", @"ms_push_game", @"rule_exe_fail", @"handler", @"newStub"
-];
+static const char* blocked_symbols[] = {
+    "AnoSDKInit", "AnoSDKInitEx", "AnoSDKIoctl", "AnoSDKIoctlOld",
+    "ChkInit", "ChkLogout", "ChkSetGameStatus", "SetUserInfoEx",
+    "mrpcs", "ms_open_file", "handler", "newStub", NULL // NULL ضروري لإنهاء اللوب
+};
 
-static NSArray* blockedLibraries = @[
-    @"AnoSDK", @"TSSSDK", @"Security", @"AntiCheat", @"mrpcs", @"ace"
-];
+static const char* blocked_libraries[] = {
+    "AnoSDK", "TSSSDK", "AntiCheat", "mrpcs", "ace", NULL
+};
 
-static NSArray* blockedSysctlNames = @[
-    @"debugger", @"security", @"csops", @"ptrace", @"jailbreak",
-    @"hw.cputype", @"hw.cpusubtype", @"kern.boottime", @"kern.proc"
-];
+static const char* blocked_sysctls[] = {
+    "debugger", "security", "csops", "ptrace", "jailbreak", NULL
+};
 
-// ============================================================
-// 3. دوال الاعتراض (Hooks)
-// ============================================================
-
-// Hook dlsym: منع الوصول إلى الرموز المحظورة
-static void* hooked_dlsym(void* handle, const char* symbol) {
-    if (symbol != NULL) {
-        NSString *sym = [NSString stringWithUTF8String:symbol];
-        for (NSString *block in blockedSymbols) {
-            if ([sym hasPrefix:block] || [sym rangeOfString:block].location != NSNotFound) {
-                NSLog(@"[Hook] 🚫 dlsym blocked: %s", symbol);
-                return NULL;
-            }
+// دالة مساعدة للبحث السريع والآمن في لغة C
+static bool is_blocked(const char* target, const char** list) {
+    if (!target) return false;
+    for (int i = 0; list[i] != NULL; i++) {
+        if (strstr(target, list[i]) != NULL) {
+            return true;
         }
+    }
+    return false;
+}
+
+// ============================================================
+// 3. دوال الاعتراض (Hooks) المحسنة
+// ============================================================
+
+static void* hooked_dlsym(void* handle, const char* symbol) {
+    if (is_blocked(symbol, blocked_symbols)) {
+        return NULL; // المشكلة #5: dlsym يتوقع NULL عند الفشل
     }
     return orig_dlsym ? orig_dlsym(handle, symbol) : NULL;
 }
 
-// Hook dlopen: منع تحميل المكتبات المحظورة
 static void* hooked_dlopen(const char* path, int mode) {
-    if (path != NULL) {
-        NSString *pathStr = [NSString stringWithUTF8String:path];
-        for (NSString *block in blockedLibraries) {
-            if ([pathStr rangeOfString:block].location != NSNotFound) {
-                NSLog(@"[Hook] 🚫 dlopen blocked: %s", path);
-                return NULL;
-            }
-        }
+    if (is_blocked(path, blocked_libraries)) {
+        return NULL;
     }
     return orig_dlopen ? orig_dlopen(path, mode) : NULL;
 }
 
-// Hook sysctl: منع استعلامات النظام الحساسة
 static int hooked_sysctl(int* name, u_int namelen, void* oldp, size_t* oldlenp, void* newp, size_t newlen) {
-    if (name != NULL && namelen >= 2) {
-        if (name[0] == CTL_KERN) {
-            if (name[1] == KERN_PROC || name[1] == KERN_BOOTTIME) {
-                NSLog(@"[Hook] 🚫 sysctl KERN_PROC/KERN_BOOTTIME blocked");
-                return -1;
-            }
+    if (name != NULL && namelen >= 2 && name[0] == CTL_KERN) {
+        if (name[1] == KERN_PROC || name[1] == KERN_BOOTTIME) {
+            errno = ENOENT; // المشكلة #5: ضبط errno يمنع التطبيق من الانهيار عند التعامل مع -1
+            return -1; 
         }
     }
     return orig_sysctl ? orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen) : -1;
 }
 
-// Hook sysctlbyname: منع استعلامات بأسماء محظورة
 static int hooked_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, void* newp, size_t newlen) {
-    if (name != NULL) {
-        NSString *nameStr = [NSString stringWithUTF8String:name];
-        for (NSString *block in blockedSysctlNames) {
-            if ([nameStr rangeOfString:block].location != NSNotFound) {
-                NSLog(@"[Hook] 🚫 sysctlbyname blocked: %s", name);
-                return -1;
-            }
-        }
+    if (is_blocked(name, blocked_sysctls)) {
+        errno = ENOENT; // إيهام النظام بأن الخاصية غير موجودة
+        return -1;
     }
     return orig_sysctlbyname ? orig_sysctlbyname(name, oldp, oldlenp, newp, newlen) : -1;
 }
 
-// Hook syscall: منع استدعاءات النظام المشبوهة (مثل ptrace)
-static int hooked_syscall(int number, ...) {
-    // 26 هو رقم ptrace في أنظمة BSD/iOS
-    if (number == 26 || number == 27) { 
-        NSLog(@"[Hook] 🚫 syscall ptrace blocked");
-        return 0; // إرجاع 0 (نجاح وهمي) لمنع إغلاق التطبيق
+// المشكلة #4: استخدام ptrace بدلاً من syscall الخطيرة
+#define PT_DENY_ATTACH 31
+static int hooked_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+    if (request == PT_DENY_ATTACH) {
+        return 0; // المشكلة #5: إرجاع 0 يعني نجاح وهمي لمنع الانهيار
     }
-    
-    // استخراج الوسائط (syscall يقبل 6 وسائط كحد أقصى)
-    va_list args;
-    va_start(args, number);
-    void *arg1 = va_arg(args, void *);
-    void *arg2 = va_arg(args, void *);
-    void *arg3 = va_arg(args, void *);
-    void *arg4 = va_arg(args, void *);
-    void *arg5 = va_arg(args, void *);
-    void *arg6 = va_arg(args, void *);
-    va_end(args);
-    
-    return orig_syscall ? orig_syscall(number, arg1, arg2, arg3, arg4, arg5, arg6) : -1;
+    return orig_ptrace ? orig_ptrace(request, pid, addr, data) : -1;
 }
 
 // ============================================================
-// 4. Method Swizzling لدوال Objective-C (مثال: UIScreen)
+// 4. نظام Swizzling الآمن (لحل المشكلة #3)
 // ============================================================
 
-// تمت إضافة الواجهة (Interface) لتجنب أخطاء البناء
-@interface SafeSwizzler : NSObject
+@interface SafeHooker : NSObject
 @end
 
-@implementation SafeSwizzler
+@implementation SafeHooker
 
-+ (void)load {
-    // Hook screenshot
-    Class screenClass = NSClassFromString(@"UIScreen");
-    SEL origSEL = NSSelectorFromString(@"screenshot");
-    Method origMethod = class_getInstanceMethod(screenClass, origSEL);
-    if (origMethod) {
-        Method swizzMethod = class_getInstanceMethod([self class], @selector(blocked_screenshot));
-        if (swizzMethod) {
-            method_exchangeImplementations(origMethod, swizzMethod);
-            NSLog(@"[Hook] ✅ UIScreenshot swizzled");
-        }
+// دالة Swizzling آمنة تتحقق من وجود الميثود أولاً
++ (void)safeSwizzleClass:(Class)cls original:(SEL)origSEL replacement:(SEL)newSEL {
+    if (!cls) return;
+    
+    Method origMethod = class_getInstanceMethod(cls, origSEL);
+    Method newMethod = class_getInstanceMethod(cls, newSEL);
+    
+    if (!origMethod || !newMethod) return; // منع الكراش إذا كان الـ API غير متوفر
+    
+    if (class_addMethod(cls, origSEL, method_getImplementation(newMethod), method_getTypeEncoding(newMethod))) {
+        class_replaceMethod(cls, newSEL, method_getImplementation(origMethod), method_getTypeEncoding(origMethod));
+    } else {
+        method_exchangeImplementations(origMethod, newMethod);
+    }
+}
+
++ (void)installObjectiveCHooks {
+    @autoreleasepool { // المشكلة #11: منع تسريب الذاكرة (ARC issues)
+        [self safeSwizzleClass:NSClassFromString(@"UIScreen") 
+                      original:NSSelectorFromString(@"screenshot") 
+                   replacement:@selector(blocked_screenshot)];
     }
 }
 
 - (UIImage*)blocked_screenshot {
-    NSLog(@"[Hook] 🚫 screenshot blocked");
     return nil;
 }
 
 @end
 
 // ============================================================
-// 5. نظام التثبيت الآمن (مع تأخير)
+// 5. نظام التثبيت بالتوقيت الصحيح (لحل المشكلة #1، #2، #6، #10)
 // ============================================================
 
-@interface HookInstaller : NSObject
-@end
-
-@implementation HookInstaller
-
-+ (void)installHooks {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        
-        // التحويل الصحيح (Casting) للأنواع حسب متطلبات fishhook (مهم جداً لتجاوز أخطاء البناء)
-        struct rebinding rebindings[] = {
-            {"dlsym", (void *)hooked_dlsym, (void **)&orig_dlsym},
-            {"dlopen", (void *)hooked_dlopen, (void **)&orig_dlopen},
-            {"sysctl", (void *)hooked_sysctl, (void **)&orig_sysctl},
-            {"sysctlbyname", (void *)hooked_sysctlbyname, (void **)&orig_sysctlbyname},
-            {"syscall", (void *)hooked_syscall, (void **)&orig_syscall}
-        };
-        
-        rebind_symbols(rebindings, sizeof(rebindings)/sizeof(rebindings[0]));
-        NSLog(@"[Hook] ✅ System hooks installed via fishhook");
-        
-    });
+static void InstallLowLevelHooks() {
+    struct rebinding rebindings[] = {
+        {"dlsym", (void *)hooked_dlsym, (void **)&orig_dlsym},
+        {"dlopen", (void *)hooked_dlopen, (void **)&orig_dlopen},
+        {"sysctl", (void *)hooked_sysctl, (void **)&orig_sysctl},
+        {"sysctlbyname", (void *)hooked_sysctlbyname, (void **)&orig_sysctlbyname},
+        {"ptrace", (void *)hooked_ptrace, (void **)&orig_ptrace}
+    };
+    
+    // المشكلة #6: التحقق من نجاح الـ Rebinding
+    int result = rebind_symbols(rebindings, sizeof(rebindings)/sizeof(rebindings[0]));
+    if (result != 0) {
+        // فشل التثبيت، يمكن إضافة لوج هنا
+    }
 }
 
-@end
-
-// ============================================================
-// 6. Constructor مع تأخير
-// ============================================================
+// دالة يتم استدعاؤها عند انتهاء التطبيق من التحميل تماماً
+static void AppFinishedLaunching(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    [SafeHooker installObjectiveCHooks];
+}
 
 __attribute__((constructor))
 static void InitializeHooks() {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [HookInstaller installHooks];
-    });
+    // 1. تثبيت الـ C Hooks المنخفضة المستوى فوراً (آمنة تماماً)
+    InstallLowLevelHooks();
+    
+    // 2. المشكلة #2 و #10: تثبيت Objective-C Hooks بعد انتهاء تحميل UIKit تماماً
+    CFNotificationCenterAddObserver(CFNotificationCenterGetLocalCenter(), 
+                                    NULL, 
+                                    AppFinishedLaunching, 
+                                    (CFStringRef)UIApplicationDidFinishLaunchingNotification, 
+                                    NULL, 
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
 }
