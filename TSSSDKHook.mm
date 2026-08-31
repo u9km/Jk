@@ -1,7 +1,6 @@
 // ============================================================
 // ENTERPRISE-GRADE CRASH-FREE HOOK SYSTEM (ARM64 / iOS)
-// Strictly POSIX compliant, Memory-Safe, No Dummy ABIs
-// Version 7.0 — Deferred Init, Explicit Lifecycle, Restorable
+// Version 7.1 — With Statistics & Control API
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -23,7 +22,7 @@
 #endif
 
 // ============================================================
-// 1. التوقيعات الرسمية (نستخدم تعريفات النظام مباشرة)
+// 1. التوقيعات الرسمية
 // ============================================================
 
 typedef void* (*dlsym_orig_t)(void* __handle, const char* __symbol);
@@ -32,14 +31,14 @@ typedef int (*sysctl_orig_t)(int* __name, u_int __namelen, void* __oldp, size_t*
 typedef int (*sysctlbyname_orig_t)(const char* __name, void* __oldp, size_t* __oldlenp, void* __newp, size_t __newlen);
 typedef int (*ptrace_orig_t)(int _request, pid_t _pid, caddr_t _addr, int _data);
 
-// تخزين المؤشرات الأصلية - نستخدم مؤشرات عادية داخل fishhook ثم ننشرها إلى atomic
+// تخزين المؤشرات الأصلية
 static dlsym_orig_t orig_dlsym_ptr = NULL;
 static dlopen_orig_t orig_dlopen_ptr = NULL;
 static sysctl_orig_t orig_sysctl_ptr = NULL;
 static sysctlbyname_orig_t orig_sysctlbyname_ptr = NULL;
 static ptrace_orig_t orig_ptrace_ptr = NULL;
 
-// نسخ atomic للقراءة الآمنة داخل الـ hooks
+// نسخ atomic للقراءة الآمنة
 static _Atomic(dlsym_orig_t)         atomic_orig_dlsym = NULL;
 static _Atomic(dlopen_orig_t)        atomic_orig_dlopen = NULL;
 static _Atomic(sysctl_orig_t)        atomic_orig_sysctl = NULL;
@@ -47,8 +46,7 @@ static _Atomic(sysctlbyname_orig_t)  atomic_orig_sysctlbyname = NULL;
 static _Atomic(ptrace_orig_t)        atomic_orig_ptrace = NULL;
 
 // ============================================================
-// 2. حالة النظام (State Machine)
-//    Uninitialized → Installed → Enabled ⇄ Disabled → Restored
+// 2. حالة النظام
 // ============================================================
 
 typedef enum {
@@ -69,14 +67,28 @@ static __thread bool in_sysctlbyname_hook = false;
 static __thread bool in_ptrace_hook = false;
 
 // ============================================================
-// 3. قوائم المنع والتحقق من البادئة
+// 3. العدادات الإحصائية (atomic)
+// ============================================================
+
+static _Atomic int cnt_dlsym_calls = 0;
+static _Atomic int cnt_dlsym_blocked = 0;
+static _Atomic int cnt_dlopen_calls = 0;
+static _Atomic int cnt_dlopen_blocked = 0;
+static _Atomic int cnt_sysctl_calls = 0;
+static _Atomic int cnt_sysctl_blocked = 0;
+static _Atomic int cnt_sysctlbyname_calls = 0;
+static _Atomic int cnt_sysctlbyname_blocked = 0;
+static _Atomic int cnt_ptrace_calls = 0;
+static _Atomic int cnt_ptrace_handled = 0;
+
+// ============================================================
+// 4. قوائم المنع والتحقق من البادئة
 // ============================================================
 
 static const char* blocked_symbols[]   = { "AnoSDKInit", "ChkInit", "mrpcs", NULL };
 static const char* blocked_libraries[] = { "AnoSDK", "TSSSDK", "AntiCheat", NULL };
 static const char* blocked_sysctls[]   = { "debugger", "security", "csops", "ptrace", "jailbreak", NULL };
 
-// تحقق سريع من البادئة (نعتمد على عقد API الرسمي - المدخلات صالحة)
 static inline bool has_prefix(const char* str, const char* prefix) {
     if (!str || !prefix) return false;
     size_t len = strlen(prefix);
@@ -84,24 +96,25 @@ static inline bool has_prefix(const char* str, const char* prefix) {
 }
 
 // ============================================================
-// 4. الـ Hooks (سريعة، بلا فحوص إضافية، تعتمد على atomic pointers)
+// 5. دوال الـ Hooks مع العدادات
 // ============================================================
 
 static void* hooked_dlsym(void* handle, const char* symbol) {
     HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
     dlsym_orig_t orig = atomic_load_explicit(&atomic_orig_dlsym, memory_order_acquire);
     
-    // إذا لم تكن الحالة Enabled أو كانت هناك عودية أو المؤشر غير جاهز، نمرر مباشرة
     if (state != HookStateEnabled || in_dlsym_hook || !orig) {
         return orig ? orig(handle, symbol) : NULL;
     }
     
     in_dlsym_hook = true;
     
+    atomic_fetch_add(&cnt_dlsym_calls, 1);
     bool blocked = false;
     for (int i = 0; blocked_symbols[i]; i++) {
         if (has_prefix(symbol, blocked_symbols[i])) {
             blocked = true;
+            atomic_fetch_add(&cnt_dlsym_blocked, 1);
             break;
         }
     }
@@ -122,10 +135,12 @@ static void* hooked_dlopen(const char* path, int mode) {
     
     in_dlopen_hook = true;
     
+    atomic_fetch_add(&cnt_dlopen_calls, 1);
     bool blocked = false;
     for (int i = 0; blocked_libraries[i]; i++) {
         if (has_prefix(path, blocked_libraries[i])) {
             blocked = true;
+            atomic_fetch_add(&cnt_dlopen_blocked, 1);
             break;
         }
     }
@@ -146,11 +161,12 @@ static int hooked_sysctl(int* name, u_int namelen, void* oldp, size_t* oldlenp, 
     
     in_sysctl_hook = true;
     
+    atomic_fetch_add(&cnt_sysctl_calls, 1);
     bool blocked = false;
-    // التحقق من المؤشر والطول قبل القراءة
     if (namelen >= 2 && name != NULL && name[0] == CTL_KERN) {
         if (name[1] == KERN_PROC || name[1] == KERN_BOOTTIME) {
             blocked = true;
+            atomic_fetch_add(&cnt_sysctl_blocked, 1);
         }
     }
     
@@ -176,10 +192,12 @@ static int hooked_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, vo
     
     in_sysctlbyname_hook = true;
     
+    atomic_fetch_add(&cnt_sysctlbyname_calls, 1);
     bool blocked = false;
     for (int i = 0; blocked_sysctls[i]; i++) {
         if (has_prefix(name, blocked_sysctls[i])) {
             blocked = true;
+            atomic_fetch_add(&cnt_sysctlbyname_blocked, 1);
             break;
         }
     }
@@ -207,9 +225,11 @@ static int hooked_ptrace(int request, pid_t pid, caddr_t addr, int data) {
     
     in_ptrace_hook = true;
     
+    atomic_fetch_add(&cnt_ptrace_calls, 1);
     int result;
     if (request == PT_DENY_ATTACH) {
         result = 0;
+        atomic_fetch_add(&cnt_ptrace_handled, 1);
     } else {
         result = orig(request, pid, addr, data);
     }
@@ -219,7 +239,7 @@ static int hooked_ptrace(int request, pid_t pid, caddr_t addr, int data) {
 }
 
 // ============================================================
-// 5. تعطيل لقطة الشاشة (مع إمكانية الاستعادة)
+// 6. تعطيل لقطة الشاشة (مع إمكانية الاستعادة)
 // ============================================================
 
 static IMP original_screenshot_imp = NULL;
@@ -239,7 +259,6 @@ static void apply_screenshot_hook(void) {
         Method screenshotMethod = class_getInstanceMethod(screenClass, screenshotSel);
         
         if (screenshotMethod) {
-            // حفظ الـ IMP الأصلية قبل التعديل
             original_screenshot_imp = method_getImplementation(screenshotMethod);
             method_setImplementation(screenshotMethod, (IMP)dummyScreenshotIMP);
             screenshot_hook_applied = true;
@@ -264,7 +283,7 @@ static void restore_screenshot_hook(void) {
 }
 
 // ============================================================
-// 6. Observer lifecycle (إدارة صريحة)
+// 7. Observer lifecycle
 // ============================================================
 
 static const void* kAppLaunchObserver = &kAppLaunchObserver;
@@ -308,26 +327,21 @@ static void unregister_observer(void) {
 }
 
 // ============================================================
-// 7. التهيئة والتثبيت المؤجل (Deferred Initialization)
+// 8. التهيئة والتثبيت المؤجل
 // ============================================================
 
-// لا نستخدم constructor للقيام بالعمل الثقيل؛ بدلاً من ذلك نوفر دالة صريحة
 __attribute__((constructor))
 static void minimal_constructor(void) {
-    // لا شيء هنا؛ فقط نترك الحالة Uninitialized
+    // لا شيء هنا
 }
 
-// دالة التثبيت الفعلية - تستدعى من التطبيق بعد اكتمال التحميل
 bool InitializeHookSystem(void) {
-    // نسمح فقط بالانتقال من Uninitialized إلى Installed
     int expected_int = (int)HookStateUninitialized;
     if (!atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateInstalled,
                                                  memory_order_acq_rel, memory_order_acquire)) {
-        // التهيئة حدثت بالفعل أو فشلت
         return false;
     }
     
-    // تنفيذ rebinding
     struct rebinding rebindings[] = {
         {"dlsym", (void *)hooked_dlsym, (void **)&orig_dlsym_ptr},
         {"dlopen", (void *)hooked_dlopen, (void **)&orig_dlopen_ptr},
@@ -338,7 +352,6 @@ bool InitializeHookSystem(void) {
     
     int result = rebind_symbols(rebindings, sizeof(rebindings)/sizeof(rebindings[0]));
     
-    // التحقق من نجاح التثبيت
     bool success = (result == 0 &&
                     orig_dlsym_ptr != NULL &&
                     orig_dlopen_ptr != NULL &&
@@ -347,18 +360,15 @@ bool InitializeHookSystem(void) {
                     orig_ptrace_ptr != NULL);
     
     if (success) {
-        // نشر المؤشرات إلى النسخ atomic
         atomic_store_explicit(&atomic_orig_dlsym, orig_dlsym_ptr, memory_order_release);
         atomic_store_explicit(&atomic_orig_dlopen, orig_dlopen_ptr, memory_order_release);
         atomic_store_explicit(&atomic_orig_sysctl, orig_sysctl_ptr, memory_order_release);
         atomic_store_explicit(&atomic_orig_sysctlbyname, orig_sysctlbyname_ptr, memory_order_release);
         atomic_store_explicit(&atomic_orig_ptrace, orig_ptrace_ptr, memory_order_release);
         
-        // الحالة تبقى Installed (جاهزة للتفعيل)
         os_log_info(OS_LOG_DEFAULT, "Hook system installed successfully.");
         return true;
     } else {
-        // فشل التثبيت - نعيد الحالة إلى Uninitialized
         atomic_store_explicit(&hook_state, (int)HookStateUninitialized, memory_order_release);
         os_log_error(OS_LOG_DEFAULT, "Hook system installation failed (rebind_result=%d).", result);
         return false;
@@ -366,22 +376,19 @@ bool InitializeHookSystem(void) {
 }
 
 // ============================================================
-// 8. واجهة التحكم العامة
+// 9. واجهة التحكم العامة
 // ============================================================
 
 bool EnableHookSystem(void) {
-    // ننتقل من Installed أو Disabled إلى Enabled
     int expected_int = (int)HookStateInstalled;
     if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateEnabled,
                                                 memory_order_acq_rel, memory_order_acquire)) {
-        // نجح التفعيل من Installed
         register_observer_if_needed();
         apply_screenshot_hook();
         os_log_info(OS_LOG_DEFAULT, "Hook system enabled.");
         return true;
     }
     
-    // إذا كانت الحالة Disabled نسمح بإعادة التفعيل
     expected_int = (int)HookStateDisabled;
     if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateEnabled,
                                                 memory_order_acq_rel, memory_order_acquire)) {
@@ -391,16 +398,13 @@ bool EnableHookSystem(void) {
         return true;
     }
     
-    // أي حالة أخرى لا تسمح بالتفعيل
     return false;
 }
 
 bool DisableHookSystem(void) {
-    // ننتقل من Enabled إلى Disabled
     int expected_int = (int)HookStateEnabled;
     if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateDisabled,
                                                 memory_order_acq_rel, memory_order_acquire)) {
-        // نوقف التدخل فقط، لا نزيل الـ hooks
         unregister_observer();
         os_log_info(OS_LOG_DEFAULT, "Hook system disabled.");
         return true;
@@ -409,18 +413,15 @@ bool DisableHookSystem(void) {
 }
 
 bool RestoreHookSystem(void) {
-    // ننتقل إلى Restored (إزالة كاملة)
     int expected_int = (int)HookStateDisabled;
     if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateRestored,
                                                 memory_order_acq_rel, memory_order_acquire)) {
-        // إعادة الـ IMP الأصلية للقطة الشاشة
         restore_screenshot_hook();
         unregister_observer();
         os_log_info(OS_LOG_DEFAULT, "Hook system restored.");
         return true;
     }
     
-    // يمكن أيضًا الاستعادة من Enabled
     expected_int = (int)HookStateEnabled;
     if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateRestored,
                                                 memory_order_acq_rel, memory_order_acquire)) {
@@ -431,4 +432,40 @@ bool RestoreHookSystem(void) {
     }
     
     return false;
+}
+
+// ============================================================
+// 10. دالة جلب الإحصائيات
+// ============================================================
+
+typedef struct {
+    int total_dlsym_calls;
+    int total_dlsym_blocked;
+    int total_dlopen_calls;
+    int total_dlopen_blocked;
+    int total_sysctl_calls;
+    int total_sysctl_blocked;
+    int total_sysctlbyname_calls;
+    int total_sysctlbyname_blocked;
+    int total_ptrace_calls;
+    int total_ptrace_handled;
+    int screenshot_hook_active;
+    int hook_state;
+} HookStatistics;
+
+extern "C" HookStatistics GetHookStatistics(void) {
+    HookStatistics stats;
+    stats.total_dlsym_calls = atomic_load(&cnt_dlsym_calls);
+    stats.total_dlsym_blocked = atomic_load(&cnt_dlsym_blocked);
+    stats.total_dlopen_calls = atomic_load(&cnt_dlopen_calls);
+    stats.total_dlopen_blocked = atomic_load(&cnt_dlopen_blocked);
+    stats.total_sysctl_calls = atomic_load(&cnt_sysctl_calls);
+    stats.total_sysctl_blocked = atomic_load(&cnt_sysctl_blocked);
+    stats.total_sysctlbyname_calls = atomic_load(&cnt_sysctlbyname_calls);
+    stats.total_sysctlbyname_blocked = atomic_load(&cnt_sysctlbyname_blocked);
+    stats.total_ptrace_calls = atomic_load(&cnt_ptrace_calls);
+    stats.total_ptrace_handled = atomic_load(&cnt_ptrace_handled);
+    stats.screenshot_hook_active = screenshot_hook_applied ? 1 : 0;
+    stats.hook_state = atomic_load(&hook_state);
+    return stats;
 }
