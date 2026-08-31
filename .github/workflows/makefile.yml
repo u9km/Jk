@@ -60,22 +60,28 @@ jobs:
       - name: ✅ التحقق من المخرجات
         run: |
           set -euo pipefail
-          DYLIB_PATH=".theos/obj/debug/arm64/libTSSSDKHook.dylib"
-          if [ -f "$DYLIB_PATH" ]; then
-            echo "📦 تم البناء بنجاح"
-            file "$DYLIB_PATH"
-            lipo -info "$DYLIB_PATH"
+          echo "📦 البحث عن ملفات dylib الناتجة..."
+          find .theos -name "*.dylib" -type f -print
+          if find .theos/obj/debug -name "TSSSDKHook.dylib" -type f | grep -q .; then
+            echo "✅ تم العثور على dylib"
           else
-            echo "❌ الملف غير موجود، البحث عن أي dylib"
-            find .theos -name "*.dylib" -type f
+            echo "❌ لم يتم العثور على dylib"
             exit 1
           fi
+          for f in $(find .theos/obj/debug -name "TSSSDKHook.dylib" -type f); do
+            echo "--- $f ---"
+            file "$f"
+            lipo -info "$f" || true
+          done
 
       - name: 📤 رفع dylib
         uses: actions/upload-artifact@v4
         with:
           name: libTSSSDKHook-theos
           path: |
-            .theos/obj/debug/arm64/libTSSSDKHook.dylib
+            .theos/obj/debug/arm64/TSSSDKHook.dylib
+            .theos/obj/debug/arm64e/TSSSDKHook.dylib
+            .theos/_/usr/lib/TSSSDKHook.dylib
             packages/*.deb
+          if-no-files-found: warn
           retention-days: 30
