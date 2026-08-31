@@ -1,0 +1,9 @@
+Package: com.pubgmobile.tsssdkhook
+Name: TSSSDK Hook
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Enterprise-grade hook system for iOS (ARM64/ARM64e)
+Maintainer: Your Name <you@example.com>
+Author: Your Name <you@example.com>
+Section: Development
+Depends: firmware (>= 12.0)
