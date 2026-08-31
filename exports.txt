@@ -1,4 +1,5 @@
-_RTL_Init
-_RTL_language
-_TSSSDKHookInitialize
-_TSSSDKHookCleanup
+_InitializeHookSystem
+_EnableHookSystem
+_DisableHookSystem
+_RestoreHookSystem
+_GetHookStatistics
