@@ -38,12 +38,14 @@ jobs:
           set -euo pipefail
           export THEOS=/opt/theos
           mkdir -p $THEOS/sdks
-          # يمكنك تنزيل SDK جاهز أو نسخه من Xcode
-          # هنا نستخدم SDK الموجود في Xcode (يختلف حسب النسخة)
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           SDK_VERSION=$(xcrun --sdk iphoneos --show-sdk-version)
           ln -sf "$SDK_PATH" "$THEOS/sdks/iPhoneOS${SDK_VERSION}.sdk"
           echo "✅ تم ربط SDK: iPhoneOS${SDK_VERSION}.sdk"
+
+      - name: 🔧 تثبيت ldid
+        run: |
+          brew install ldid
 
       - name: 🧹 تنظيف
         run: |
