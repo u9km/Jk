@@ -5,6 +5,7 @@
 // ============================================================
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <sys/sysctl.h>
@@ -87,7 +88,7 @@ static inline bool has_prefix(const char* str, const char* prefix) {
 // ============================================================
 
 static void* hooked_dlsym(void* handle, const char* symbol) {
-    HookState state = atomic_load_explicit(&hook_state, memory_order_acquire);
+    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
     dlsym_orig_t orig = atomic_load_explicit(&atomic_orig_dlsym, memory_order_acquire);
     
     // إذا لم تكن الحالة Enabled أو كانت هناك عودية أو المؤشر غير جاهز، نمرر مباشرة
@@ -112,7 +113,7 @@ static void* hooked_dlsym(void* handle, const char* symbol) {
 }
 
 static void* hooked_dlopen(const char* path, int mode) {
-    HookState state = atomic_load_explicit(&hook_state, memory_order_acquire);
+    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
     dlopen_orig_t orig = atomic_load_explicit(&atomic_orig_dlopen, memory_order_acquire);
     
     if (state != HookStateEnabled || in_dlopen_hook || !orig) {
@@ -136,7 +137,7 @@ static void* hooked_dlopen(const char* path, int mode) {
 }
 
 static int hooked_sysctl(int* name, u_int namelen, void* oldp, size_t* oldlenp, void* newp, size_t newlen) {
-    HookState state = atomic_load_explicit(&hook_state, memory_order_acquire);
+    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
     sysctl_orig_t orig = atomic_load_explicit(&atomic_orig_sysctl, memory_order_acquire);
     
     if (state != HookStateEnabled || in_sysctl_hook || !orig) {
@@ -166,7 +167,7 @@ static int hooked_sysctl(int* name, u_int namelen, void* oldp, size_t* oldlenp, 
 }
 
 static int hooked_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, void* newp, size_t newlen) {
-    HookState state = atomic_load_explicit(&hook_state, memory_order_acquire);
+    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
     sysctlbyname_orig_t orig = atomic_load_explicit(&atomic_orig_sysctlbyname, memory_order_acquire);
     
     if (state != HookStateEnabled || in_sysctlbyname_hook || !orig) {
@@ -197,7 +198,7 @@ static int hooked_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, vo
 
 #define PT_DENY_ATTACH 31
 static int hooked_ptrace(int request, pid_t pid, caddr_t addr, int data) {
-    HookState state = atomic_load_explicit(&hook_state, memory_order_acquire);
+    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
     ptrace_orig_t orig = atomic_load_explicit(&atomic_orig_ptrace, memory_order_acquire);
     
     if (state != HookStateEnabled || in_ptrace_hook || !orig) {
@@ -274,7 +275,7 @@ static void app_launch_callback(CFNotificationCenterRef center,
                                 CFStringRef name,
                                 const void *object,
                                 CFDictionaryRef userInfo) {
-    HookState state = atomic_load_explicit(&hook_state, memory_order_acquire);
+    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
     if (state == HookStateEnabled) {
         apply_screenshot_hook();
     }
@@ -319,8 +320,8 @@ static void minimal_constructor(void) {
 // دالة التثبيت الفعلية - تستدعى من التطبيق بعد اكتمال التحميل
 bool InitializeHookSystem(void) {
     // نسمح فقط بالانتقال من Uninitialized إلى Installed
-    HookState expected = HookStateUninitialized;
-    if (!atomic_compare_exchange_strong_explicit(&hook_state, &expected, HookStateInstalled,
+    int expected_int = (int)HookStateUninitialized;
+    if (!atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateInstalled,
                                                  memory_order_acq_rel, memory_order_acquire)) {
         // التهيئة حدثت بالفعل أو فشلت
         return false;
@@ -358,7 +359,7 @@ bool InitializeHookSystem(void) {
         return true;
     } else {
         // فشل التثبيت - نعيد الحالة إلى Uninitialized
-        atomic_store_explicit(&hook_state, HookStateUninitialized, memory_order_release);
+        atomic_store_explicit(&hook_state, (int)HookStateUninitialized, memory_order_release);
         os_log_error(OS_LOG_DEFAULT, "Hook system installation failed (rebind_result=%d).", result);
         return false;
     }
@@ -370,8 +371,8 @@ bool InitializeHookSystem(void) {
 
 bool EnableHookSystem(void) {
     // ننتقل من Installed أو Disabled إلى Enabled
-    HookState expected = HookStateInstalled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected, HookStateEnabled,
+    int expected_int = (int)HookStateInstalled;
+    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateEnabled,
                                                 memory_order_acq_rel, memory_order_acquire)) {
         // نجح التفعيل من Installed
         register_observer_if_needed();
@@ -381,8 +382,8 @@ bool EnableHookSystem(void) {
     }
     
     // إذا كانت الحالة Disabled نسمح بإعادة التفعيل
-    expected = HookStateDisabled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected, HookStateEnabled,
+    expected_int = (int)HookStateDisabled;
+    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateEnabled,
                                                 memory_order_acq_rel, memory_order_acquire)) {
         register_observer_if_needed();
         apply_screenshot_hook();
@@ -396,8 +397,8 @@ bool EnableHookSystem(void) {
 
 bool DisableHookSystem(void) {
     // ننتقل من Enabled إلى Disabled
-    HookState expected = HookStateEnabled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected, HookStateDisabled,
+    int expected_int = (int)HookStateEnabled;
+    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateDisabled,
                                                 memory_order_acq_rel, memory_order_acquire)) {
         // نوقف التدخل فقط، لا نزيل الـ hooks
         unregister_observer();
@@ -409,8 +410,8 @@ bool DisableHookSystem(void) {
 
 bool RestoreHookSystem(void) {
     // ننتقل إلى Restored (إزالة كاملة)
-    HookState expected = HookStateDisabled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected, HookStateRestored,
+    int expected_int = (int)HookStateDisabled;
+    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateRestored,
                                                 memory_order_acq_rel, memory_order_acquire)) {
         // إعادة الـ IMP الأصلية للقطة الشاشة
         restore_screenshot_hook();
@@ -420,8 +421,8 @@ bool RestoreHookSystem(void) {
     }
     
     // يمكن أيضًا الاستعادة من Enabled
-    expected = HookStateEnabled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected, HookStateRestored,
+    expected_int = (int)HookStateEnabled;
+    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateRestored,
                                                 memory_order_acq_rel, memory_order_acquire)) {
         restore_screenshot_hook();
         unregister_observer();
