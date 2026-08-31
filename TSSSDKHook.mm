@@ -1,6 +1,6 @@
 // ============================================================
 // ENTERPRISE-GRADE CRASH-FREE HOOK SYSTEM (ARM64 / iOS)
-// Version 7.1 — With Statistics & Control API
+// Version 7.2 — With Statistics & Control API (C++17 std::atomic)
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -11,7 +11,7 @@
 #import <errno.h>
 #import <stdbool.h>
 #import <string.h>
-#import <stdatomic.h>
+#import <atomic>
 #import <dispatch/dispatch.h>
 #import <os/log.h>
 
@@ -31,7 +31,7 @@ typedef int (*sysctl_orig_t)(int* __name, u_int __namelen, void* __oldp, size_t*
 typedef int (*sysctlbyname_orig_t)(const char* __name, void* __oldp, size_t* __oldlenp, void* __newp, size_t __newlen);
 typedef int (*ptrace_orig_t)(int _request, pid_t _pid, caddr_t _addr, int _data);
 
-// تخزين المؤشرات الأصلية
+// تخزين المؤشرات الأصلية (غير ذرية - تستخدم فقط أثناء التهيئة)
 static dlsym_orig_t orig_dlsym_ptr = NULL;
 static dlopen_orig_t orig_dlopen_ptr = NULL;
 static sysctl_orig_t orig_sysctl_ptr = NULL;
@@ -39,11 +39,11 @@ static sysctlbyname_orig_t orig_sysctlbyname_ptr = NULL;
 static ptrace_orig_t orig_ptrace_ptr = NULL;
 
 // نسخ atomic للقراءة الآمنة
-static _Atomic(dlsym_orig_t)         atomic_orig_dlsym = NULL;
-static _Atomic(dlopen_orig_t)        atomic_orig_dlopen = NULL;
-static _Atomic(sysctl_orig_t)        atomic_orig_sysctl = NULL;
-static _Atomic(sysctlbyname_orig_t)  atomic_orig_sysctlbyname = NULL;
-static _Atomic(ptrace_orig_t)        atomic_orig_ptrace = NULL;
+static std::atomic<dlsym_orig_t>        atomic_orig_dlsym{nullptr};
+static std::atomic<dlopen_orig_t>       atomic_orig_dlopen{nullptr};
+static std::atomic<sysctl_orig_t>       atomic_orig_sysctl{nullptr};
+static std::atomic<sysctlbyname_orig_t> atomic_orig_sysctlbyname{nullptr};
+static std::atomic<ptrace_orig_t>       atomic_orig_ptrace{nullptr};
 
 // ============================================================
 // 2. حالة النظام
@@ -57,7 +57,7 @@ typedef enum {
     HookStateRestored
 } HookState;
 
-static atomic_int hook_state = HookStateUninitialized;
+static std::atomic<int> hook_state{HookStateUninitialized};
 
 // TLS flags للحد من العودية
 static __thread bool in_dlsym_hook = false;
@@ -70,16 +70,16 @@ static __thread bool in_ptrace_hook = false;
 // 3. العدادات الإحصائية (atomic)
 // ============================================================
 
-static _Atomic int cnt_dlsym_calls = 0;
-static _Atomic int cnt_dlsym_blocked = 0;
-static _Atomic int cnt_dlopen_calls = 0;
-static _Atomic int cnt_dlopen_blocked = 0;
-static _Atomic int cnt_sysctl_calls = 0;
-static _Atomic int cnt_sysctl_blocked = 0;
-static _Atomic int cnt_sysctlbyname_calls = 0;
-static _Atomic int cnt_sysctlbyname_blocked = 0;
-static _Atomic int cnt_ptrace_calls = 0;
-static _Atomic int cnt_ptrace_handled = 0;
+static std::atomic<int> cnt_dlsym_calls{0};
+static std::atomic<int> cnt_dlsym_blocked{0};
+static std::atomic<int> cnt_dlopen_calls{0};
+static std::atomic<int> cnt_dlopen_blocked{0};
+static std::atomic<int> cnt_sysctl_calls{0};
+static std::atomic<int> cnt_sysctl_blocked{0};
+static std::atomic<int> cnt_sysctlbyname_calls{0};
+static std::atomic<int> cnt_sysctlbyname_blocked{0};
+static std::atomic<int> cnt_ptrace_calls{0};
+static std::atomic<int> cnt_ptrace_handled{0};
 
 // ============================================================
 // 4. قوائم المنع والتحقق من البادئة
@@ -100,8 +100,8 @@ static inline bool has_prefix(const char* str, const char* prefix) {
 // ============================================================
 
 static void* hooked_dlsym(void* handle, const char* symbol) {
-    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
-    dlsym_orig_t orig = atomic_load_explicit(&atomic_orig_dlsym, memory_order_acquire);
+    HookState state = static_cast<HookState>(hook_state.load(std::memory_order_acquire));
+    dlsym_orig_t orig = atomic_orig_dlsym.load(std::memory_order_acquire);
     
     if (state != HookStateEnabled || in_dlsym_hook || !orig) {
         return orig ? orig(handle, symbol) : NULL;
@@ -109,12 +109,12 @@ static void* hooked_dlsym(void* handle, const char* symbol) {
     
     in_dlsym_hook = true;
     
-    atomic_fetch_add(&cnt_dlsym_calls, 1);
+    cnt_dlsym_calls.fetch_add(1, std::memory_order_relaxed);
     bool blocked = false;
     for (int i = 0; blocked_symbols[i]; i++) {
         if (has_prefix(symbol, blocked_symbols[i])) {
             blocked = true;
-            atomic_fetch_add(&cnt_dlsym_blocked, 1);
+            cnt_dlsym_blocked.fetch_add(1, std::memory_order_relaxed);
             break;
         }
     }
@@ -126,8 +126,8 @@ static void* hooked_dlsym(void* handle, const char* symbol) {
 }
 
 static void* hooked_dlopen(const char* path, int mode) {
-    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
-    dlopen_orig_t orig = atomic_load_explicit(&atomic_orig_dlopen, memory_order_acquire);
+    HookState state = static_cast<HookState>(hook_state.load(std::memory_order_acquire));
+    dlopen_orig_t orig = atomic_orig_dlopen.load(std::memory_order_acquire);
     
     if (state != HookStateEnabled || in_dlopen_hook || !orig) {
         return orig ? orig(path, mode) : NULL;
@@ -135,12 +135,12 @@ static void* hooked_dlopen(const char* path, int mode) {
     
     in_dlopen_hook = true;
     
-    atomic_fetch_add(&cnt_dlopen_calls, 1);
+    cnt_dlopen_calls.fetch_add(1, std::memory_order_relaxed);
     bool blocked = false;
     for (int i = 0; blocked_libraries[i]; i++) {
         if (has_prefix(path, blocked_libraries[i])) {
             blocked = true;
-            atomic_fetch_add(&cnt_dlopen_blocked, 1);
+            cnt_dlopen_blocked.fetch_add(1, std::memory_order_relaxed);
             break;
         }
     }
@@ -152,8 +152,8 @@ static void* hooked_dlopen(const char* path, int mode) {
 }
 
 static int hooked_sysctl(int* name, u_int namelen, void* oldp, size_t* oldlenp, void* newp, size_t newlen) {
-    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
-    sysctl_orig_t orig = atomic_load_explicit(&atomic_orig_sysctl, memory_order_acquire);
+    HookState state = static_cast<HookState>(hook_state.load(std::memory_order_acquire));
+    sysctl_orig_t orig = atomic_orig_sysctl.load(std::memory_order_acquire);
     
     if (state != HookStateEnabled || in_sysctl_hook || !orig) {
         return orig ? orig(name, namelen, oldp, oldlenp, newp, newlen) : -1;
@@ -161,12 +161,12 @@ static int hooked_sysctl(int* name, u_int namelen, void* oldp, size_t* oldlenp, 
     
     in_sysctl_hook = true;
     
-    atomic_fetch_add(&cnt_sysctl_calls, 1);
+    cnt_sysctl_calls.fetch_add(1, std::memory_order_relaxed);
     bool blocked = false;
     if (namelen >= 2 && name != NULL && name[0] == CTL_KERN) {
         if (name[1] == KERN_PROC || name[1] == KERN_BOOTTIME) {
             blocked = true;
-            atomic_fetch_add(&cnt_sysctl_blocked, 1);
+            cnt_sysctl_blocked.fetch_add(1, std::memory_order_relaxed);
         }
     }
     
@@ -183,8 +183,8 @@ static int hooked_sysctl(int* name, u_int namelen, void* oldp, size_t* oldlenp, 
 }
 
 static int hooked_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, void* newp, size_t newlen) {
-    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
-    sysctlbyname_orig_t orig = atomic_load_explicit(&atomic_orig_sysctlbyname, memory_order_acquire);
+    HookState state = static_cast<HookState>(hook_state.load(std::memory_order_acquire));
+    sysctlbyname_orig_t orig = atomic_orig_sysctlbyname.load(std::memory_order_acquire);
     
     if (state != HookStateEnabled || in_sysctlbyname_hook || !orig) {
         return orig ? orig(name, oldp, oldlenp, newp, newlen) : -1;
@@ -192,12 +192,12 @@ static int hooked_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, vo
     
     in_sysctlbyname_hook = true;
     
-    atomic_fetch_add(&cnt_sysctlbyname_calls, 1);
+    cnt_sysctlbyname_calls.fetch_add(1, std::memory_order_relaxed);
     bool blocked = false;
     for (int i = 0; blocked_sysctls[i]; i++) {
         if (has_prefix(name, blocked_sysctls[i])) {
             blocked = true;
-            atomic_fetch_add(&cnt_sysctlbyname_blocked, 1);
+            cnt_sysctlbyname_blocked.fetch_add(1, std::memory_order_relaxed);
             break;
         }
     }
@@ -216,8 +216,8 @@ static int hooked_sysctlbyname(const char* name, void* oldp, size_t* oldlenp, vo
 
 #define PT_DENY_ATTACH 31
 static int hooked_ptrace(int request, pid_t pid, caddr_t addr, int data) {
-    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
-    ptrace_orig_t orig = atomic_load_explicit(&atomic_orig_ptrace, memory_order_acquire);
+    HookState state = static_cast<HookState>(hook_state.load(std::memory_order_acquire));
+    ptrace_orig_t orig = atomic_orig_ptrace.load(std::memory_order_acquire);
     
     if (state != HookStateEnabled || in_ptrace_hook || !orig) {
         return orig ? orig(request, pid, addr, data) : -1;
@@ -225,11 +225,11 @@ static int hooked_ptrace(int request, pid_t pid, caddr_t addr, int data) {
     
     in_ptrace_hook = true;
     
-    atomic_fetch_add(&cnt_ptrace_calls, 1);
+    cnt_ptrace_calls.fetch_add(1, std::memory_order_relaxed);
     int result;
     if (request == PT_DENY_ATTACH) {
         result = 0;
-        atomic_fetch_add(&cnt_ptrace_handled, 1);
+        cnt_ptrace_handled.fetch_add(1, std::memory_order_relaxed);
     } else {
         result = orig(request, pid, addr, data);
     }
@@ -294,7 +294,7 @@ static void app_launch_callback(CFNotificationCenterRef center,
                                 CFStringRef name,
                                 const void *object,
                                 CFDictionaryRef userInfo) {
-    HookState state = (HookState)atomic_load_explicit(&hook_state, memory_order_acquire);
+    HookState state = static_cast<HookState>(hook_state.load(std::memory_order_acquire));
     if (state == HookStateEnabled) {
         apply_screenshot_hook();
     }
@@ -330,10 +330,15 @@ static void unregister_observer(void) {
 // 8. التهيئة والتثبيت المؤجل
 // ============================================================
 
+__attribute__((constructor))
+static void minimal_constructor(void) {
+    // لا شيء هنا
+}
+
 extern "C" bool InitializeHookSystem(void) {
-    int expected_int = (int)HookStateUninitialized;
-    if (!atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateInstalled,
-                                                 memory_order_acq_rel, memory_order_acquire)) {
+    int expected_int = static_cast<int>(HookStateUninitialized);
+    if (!hook_state.compare_exchange_strong(expected_int, static_cast<int>(HookStateInstalled),
+                                            std::memory_order_acq_rel, std::memory_order_acquire)) {
         return false;
     }
     
@@ -355,16 +360,16 @@ extern "C" bool InitializeHookSystem(void) {
                     orig_ptrace_ptr != NULL);
     
     if (success) {
-        atomic_store_explicit(&atomic_orig_dlsym, orig_dlsym_ptr, memory_order_release);
-        atomic_store_explicit(&atomic_orig_dlopen, orig_dlopen_ptr, memory_order_release);
-        atomic_store_explicit(&atomic_orig_sysctl, orig_sysctl_ptr, memory_order_release);
-        atomic_store_explicit(&atomic_orig_sysctlbyname, orig_sysctlbyname_ptr, memory_order_release);
-        atomic_store_explicit(&atomic_orig_ptrace, orig_ptrace_ptr, memory_order_release);
+        atomic_orig_dlsym.store(orig_dlsym_ptr, std::memory_order_release);
+        atomic_orig_dlopen.store(orig_dlopen_ptr, std::memory_order_release);
+        atomic_orig_sysctl.store(orig_sysctl_ptr, std::memory_order_release);
+        atomic_orig_sysctlbyname.store(orig_sysctlbyname_ptr, std::memory_order_release);
+        atomic_orig_ptrace.store(orig_ptrace_ptr, std::memory_order_release);
         
         os_log_info(OS_LOG_DEFAULT, "Hook system installed successfully.");
         return true;
     } else {
-        atomic_store_explicit(&hook_state, (int)HookStateUninitialized, memory_order_release);
+        hook_state.store(static_cast<int>(HookStateUninitialized), std::memory_order_release);
         os_log_error(OS_LOG_DEFAULT, "Hook system installation failed (rebind_result=%d).", result);
         return false;
     }
@@ -375,18 +380,18 @@ extern "C" bool InitializeHookSystem(void) {
 // ============================================================
 
 extern "C" bool EnableHookSystem(void) {
-    int expected_int = (int)HookStateInstalled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateEnabled,
-                                                memory_order_acq_rel, memory_order_acquire)) {
+    int expected_int = static_cast<int>(HookStateInstalled);
+    if (hook_state.compare_exchange_strong(expected_int, static_cast<int>(HookStateEnabled),
+                                           std::memory_order_acq_rel, std::memory_order_acquire)) {
         register_observer_if_needed();
         apply_screenshot_hook();
         os_log_info(OS_LOG_DEFAULT, "Hook system enabled.");
         return true;
     }
     
-    expected_int = (int)HookStateDisabled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateEnabled,
-                                                memory_order_acq_rel, memory_order_acquire)) {
+    expected_int = static_cast<int>(HookStateDisabled);
+    if (hook_state.compare_exchange_strong(expected_int, static_cast<int>(HookStateEnabled),
+                                           std::memory_order_acq_rel, std::memory_order_acquire)) {
         register_observer_if_needed();
         apply_screenshot_hook();
         os_log_info(OS_LOG_DEFAULT, "Hook system re-enabled.");
@@ -397,9 +402,9 @@ extern "C" bool EnableHookSystem(void) {
 }
 
 extern "C" bool DisableHookSystem(void) {
-    int expected_int = (int)HookStateEnabled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateDisabled,
-                                                memory_order_acq_rel, memory_order_acquire)) {
+    int expected_int = static_cast<int>(HookStateEnabled);
+    if (hook_state.compare_exchange_strong(expected_int, static_cast<int>(HookStateDisabled),
+                                           std::memory_order_acq_rel, std::memory_order_acquire)) {
         unregister_observer();
         os_log_info(OS_LOG_DEFAULT, "Hook system disabled.");
         return true;
@@ -408,18 +413,18 @@ extern "C" bool DisableHookSystem(void) {
 }
 
 extern "C" bool RestoreHookSystem(void) {
-    int expected_int = (int)HookStateDisabled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateRestored,
-                                                memory_order_acq_rel, memory_order_acquire)) {
+    int expected_int = static_cast<int>(HookStateDisabled);
+    if (hook_state.compare_exchange_strong(expected_int, static_cast<int>(HookStateRestored),
+                                           std::memory_order_acq_rel, std::memory_order_acquire)) {
         restore_screenshot_hook();
         unregister_observer();
         os_log_info(OS_LOG_DEFAULT, "Hook system restored.");
         return true;
     }
     
-    expected_int = (int)HookStateEnabled;
-    if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateRestored,
-                                                memory_order_acq_rel, memory_order_acquire)) {
+    expected_int = static_cast<int>(HookStateEnabled);
+    if (hook_state.compare_exchange_strong(expected_int, static_cast<int>(HookStateRestored),
+                                           std::memory_order_acq_rel, std::memory_order_acquire)) {
         restore_screenshot_hook();
         unregister_observer();
         os_log_info(OS_LOG_DEFAULT, "Hook system restored from enabled state.");
@@ -450,17 +455,17 @@ typedef struct {
 
 extern "C" HookStatistics GetHookStatistics(void) {
     HookStatistics stats;
-    stats.total_dlsym_calls = atomic_load(&cnt_dlsym_calls);
-    stats.total_dlsym_blocked = atomic_load(&cnt_dlsym_blocked);
-    stats.total_dlopen_calls = atomic_load(&cnt_dlopen_calls);
-    stats.total_dlopen_blocked = atomic_load(&cnt_dlopen_blocked);
-    stats.total_sysctl_calls = atomic_load(&cnt_sysctl_calls);
-    stats.total_sysctl_blocked = atomic_load(&cnt_sysctl_blocked);
-    stats.total_sysctlbyname_calls = atomic_load(&cnt_sysctlbyname_calls);
-    stats.total_sysctlbyname_blocked = atomic_load(&cnt_sysctlbyname_blocked);
-    stats.total_ptrace_calls = atomic_load(&cnt_ptrace_calls);
-    stats.total_ptrace_handled = atomic_load(&cnt_ptrace_handled);
+    stats.total_dlsym_calls = cnt_dlsym_calls.load(std::memory_order_relaxed);
+    stats.total_dlsym_blocked = cnt_dlsym_blocked.load(std::memory_order_relaxed);
+    stats.total_dlopen_calls = cnt_dlopen_calls.load(std::memory_order_relaxed);
+    stats.total_dlopen_blocked = cnt_dlopen_blocked.load(std::memory_order_relaxed);
+    stats.total_sysctl_calls = cnt_sysctl_calls.load(std::memory_order_relaxed);
+    stats.total_sysctl_blocked = cnt_sysctl_blocked.load(std::memory_order_relaxed);
+    stats.total_sysctlbyname_calls = cnt_sysctlbyname_calls.load(std::memory_order_relaxed);
+    stats.total_sysctlbyname_blocked = cnt_sysctlbyname_blocked.load(std::memory_order_relaxed);
+    stats.total_ptrace_calls = cnt_ptrace_calls.load(std::memory_order_relaxed);
+    stats.total_ptrace_handled = cnt_ptrace_handled.load(std::memory_order_relaxed);
     stats.screenshot_hook_active = screenshot_hook_applied ? 1 : 0;
-    stats.hook_state = atomic_load(&hook_state);
+    stats.hook_state = hook_state.load(std::memory_order_relaxed);
     return stats;
 }
