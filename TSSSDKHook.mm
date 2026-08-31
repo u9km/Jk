@@ -330,12 +330,7 @@ static void unregister_observer(void) {
 // 8. التهيئة والتثبيت المؤجل
 // ============================================================
 
-__attribute__((constructor))
-static void minimal_constructor(void) {
-    // لا شيء هنا
-}
-
-bool InitializeHookSystem(void) {
+extern "C" bool InitializeHookSystem(void) {
     int expected_int = (int)HookStateUninitialized;
     if (!atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateInstalled,
                                                  memory_order_acq_rel, memory_order_acquire)) {
@@ -379,7 +374,7 @@ bool InitializeHookSystem(void) {
 // 9. واجهة التحكم العامة
 // ============================================================
 
-bool EnableHookSystem(void) {
+extern "C" bool EnableHookSystem(void) {
     int expected_int = (int)HookStateInstalled;
     if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateEnabled,
                                                 memory_order_acq_rel, memory_order_acquire)) {
@@ -401,7 +396,7 @@ bool EnableHookSystem(void) {
     return false;
 }
 
-bool DisableHookSystem(void) {
+extern "C" bool DisableHookSystem(void) {
     int expected_int = (int)HookStateEnabled;
     if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateDisabled,
                                                 memory_order_acq_rel, memory_order_acquire)) {
@@ -412,7 +407,7 @@ bool DisableHookSystem(void) {
     return false;
 }
 
-bool RestoreHookSystem(void) {
+extern "C" bool RestoreHookSystem(void) {
     int expected_int = (int)HookStateDisabled;
     if (atomic_compare_exchange_strong_explicit(&hook_state, &expected_int, (int)HookStateRestored,
                                                 memory_order_acq_rel, memory_order_acquire)) {
