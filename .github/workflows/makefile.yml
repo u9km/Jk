@@ -1,145 +1,79 @@
-# ============================================================
-# GitHub Actions Workflow — Build TSSSDK Hook DYLIB
-# ميزات: مصفوفة معماريات، فحص الرموز، ملخص مفصّل، أمان محسّن
-# ============================================================
-
-name: Build TSSSDK Hook DYLIB
+name: Build TSSSDK Hook DYLIB (Theos)
 
 on:
   push:
     branches: [ main ]
-    tags:
-      - 'v*'
   pull_request:
     branches: [ main ]
   workflow_dispatch:
-    inputs:
-      arch:
-        description: 'اختر المعمارية (arm64, arm64e)'
-        required: true
-        default: 'arm64'
-        type: choice
-        options:
-          - arm64
-          - arm64e
 
-# منع تشغيل أكثر من عملية لنفس الفرع
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# تحديد صلاحيات العمل (أقل صلاحيات)
 permissions:
   contents: read
 
-env:
-  DYLIB_NAME: libTSSSDKHook
-  BUILD_DIR: build
-
 jobs:
   build:
-    name: بناء DYLIB (${{ matrix.arch }})
-    runs-on: macos-14   # إصدار محدد لضمان استقرار Xcode
-    strategy:
-      fail-fast: false   # لا توقف باقي المعماريات عند فشل واحدة
-      matrix:
-        arch:
-          - arm64
-          - arm64e
+    name: بناء DYLIB (arm64)
+    runs-on: macos-14
 
     steps:
-      # ---------- 1. تحميل الكود ----------
       - name: ⬇️ تحميل الكود
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # جلب كامل التاريخ (مفيد للوسوم)
 
-      # ---------- 2. إعداد البيئة ----------
-      - name: 🛠️ إعداد البيئة
+      - name: 🛠️ إعداد Theos
         run: |
           set -euo pipefail
-          echo "🔹 نظام التشغيل: $(sw_vers -productVersion)"
-          echo "🔹 Xcode: $(xcodebuild -version | head -n 1)"
-          echo "🔹 iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
-          echo "🔹 مسار SDK: $(xcrun --sdk iphoneos --show-sdk-path)"
-          echo "🔹 الملفات الموجودة:"
-          ls -la
+          echo "🔹 تثبيت Theos..."
+          export THEOS=/opt/theos
+          sudo mkdir -p $THEOS
+          sudo chown $(whoami) $THEOS
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          echo "✅ تم تثبيت Theos"
 
-      # ---------- 3. تنظيف ----------
-      - name: 🧹 تنظيف شامل
+      - name: 📦 تثبيت SDK
         run: |
           set -euo pipefail
+          export THEOS=/opt/theos
+          mkdir -p $THEOS/sdks
+          # يمكنك تنزيل SDK جاهز أو نسخه من Xcode
+          # هنا نستخدم SDK الموجود في Xcode (يختلف حسب النسخة)
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          SDK_VERSION=$(xcrun --sdk iphoneos --show-sdk-version)
+          ln -sf "$SDK_PATH" "$THEOS/sdks/iPhoneOS${SDK_VERSION}.sdk"
+          echo "✅ تم ربط SDK: iPhoneOS${SDK_VERSION}.sdk"
+
+      - name: 🧹 تنظيف
+        run: |
+          export THEOS=/opt/theos
           make clean || true
-          rm -rf "$BUILD_DIR"
-          echo "✅ تم التنظيف"
 
-      # ---------- 4. بناء DYLIB ----------
-      - name: 🔨 بناء DYLIB (${{ matrix.arch }})
+      - name: 🔨 بناء DYLIB
         run: |
-          set -euo pipefail
-          make all ARCH=${{ matrix.arch }}
-        env:
-          WARNINGS: 1   # تفعيل التحذيرات الصارمة
+          export THEOS=/opt/theos
+          make package
 
-      # ---------- 5. التحقق من المخرجات ----------
       - name: ✅ التحقق من المخرجات
         run: |
           set -euo pipefail
-          DYLIB_PATH="$BUILD_DIR/dylib/$DYLIB_NAME.dylib"
-          if [ ! -f "$DYLIB_PATH" ]; then
-            echo "❌ فشل البناء - الملف غير موجود"
-            find "$BUILD_DIR" -type f 2>/dev/null || echo "لا يوجد مجلد build"
+          DYLIB_PATH=".theos/obj/debug/arm64/libTSSSDKHook.dylib"
+          if [ -f "$DYLIB_PATH" ]; then
+            echo "📦 تم البناء بنجاح"
+            file "$DYLIB_PATH"
+            lipo -info "$DYLIB_PATH"
+          else
+            echo "❌ الملف غير موجود، البحث عن أي dylib"
+            find .theos -name "*.dylib" -type f
             exit 1
           fi
-          
-          echo "📦 معلومات الملف:"
-          echo "  الحجم: $(du -h "$DYLIB_PATH" | cut -f1)"
-          echo "  النوع: $(file "$DYLIB_PATH")"
-          echo "  المعماريات: $(lipo -info "$DYLIB_PATH")"
-          
-          # التحقق من وجود رموز غير معرفة
-          if nm -u "$DYLIB_PATH" | grep -q '^_' ; then
-            echo "⚠️ تنبيه: توجد رموز غير معرفة (خارجية)، وهذا طبيعي إذا كانت من مكتبات النظام."
-          else
-            echo "✅ لا توجد رموز غير معرفة."
-          fi
-          
-          # فحص الرموز المُصدَّرة
-          echo "📋 الرموز المُصدَّرة:"
-          nm -gU "$DYLIB_PATH" | sed 's/^/  /'
 
-      # ---------- 6. بناء وضع الإصدار (Release) إضافي ----------
-      - name: 🚀 بناء نسخة Release
-        if: matrix.arch == 'arm64'   # فقط للمعمارية الأساسية
-        run: |
-          set -euo pipefail
-          make release ARCH=${{ matrix.arch }}
-          echo "✅ تم بناء نسخة Release"
-
-      # ---------- 7. رفع القطع الأثرية ----------
-      - name: 📤 رفع DYLIB
+      - name: 📤 رفع dylib
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.DYLIB_NAME }}-${{ matrix.arch }}
+          name: libTSSSDKHook-theos
           path: |
-            ${{ env.BUILD_DIR }}/dylib/*.dylib
+            .theos/obj/debug/arm64/libTSSSDKHook.dylib
+            packages/*.deb
           retention-days: 30
-          compression-level: 0   # لا ضغط (dylib مضغوط أصلاً)
-
-      # ---------- 8. رفع نسخة Release (إن وُجدت) ----------
-      - name: 📤 رفع نسخة Release
-        if: matrix.arch == 'arm64' && success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.DYLIB_NAME }}-release
-          path: |
-            ${{ env.BUILD_DIR }}/dylib/*.dylib
-          retention-days: 30
-          compression-level: 0
-
-      # ---------- 9. إشعار عند الفشل (اختياري) ----------
-      - name: 🔔 إشعار عند الفشل
-        if: failure()
-        run: |
-          echo "❌ فشل البناء للمعمارية ${{ matrix.arch }}"
-          echo "📄 راجع السجلات أعلاه لتفاصيل الخطأ."
